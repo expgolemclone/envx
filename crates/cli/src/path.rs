@@ -5,6 +5,61 @@ use color_eyre::Result;
 use color_eyre::eyre::eyre;
 use envx_core::{EnvVarManager, PathManager};
 
+const COMMON_PATH_VARIABLES: &[&str] = &["PATH", "PYTHONPATH", "CLASSPATH", "LD_LIBRARY_PATH", "LIBRARY_PATH"];
+
+fn get_path_variable_error_message(var: &str, manager: &EnvVarManager) -> String {
+    let mut suggestions = Vec::new();
+
+    // On Windows, check for case-insensitive matches
+    if cfg!(windows) {
+        // Check all environment variables for case-insensitive matches
+        for env_var in manager.list() {
+            if env_var.name.to_lowercase() == var.to_lowercase() && env_var.name != var {
+                suggestions.push(env_var.name.clone());
+            }
+        }
+    }
+
+    // Also check common path variables for typos/case issues
+    for &common_var in COMMON_PATH_VARIABLES {
+        if common_var.to_lowercase() == var.to_lowercase()
+            && common_var != var
+            && !suggestions.contains(&common_var.to_string())
+        {
+            suggestions.push(common_var.to_string());
+        }
+    }
+
+    let os_info = if cfg!(windows) {
+        "On Windows, PATH variable names are case-insensitive."
+    } else {
+        "On Unix/Linux systems, PATH variable names are case-sensitive."
+    };
+
+    if suggestions.is_empty() {
+        format!(
+            "Environment variable '{}' not found.\n\
+            {}\n\
+            This variable might not be set in your environment.\n\
+            Common path variables: {}",
+            var,
+            os_info,
+            COMMON_PATH_VARIABLES.join(", ")
+        )
+    } else {
+        format!(
+            "Environment variable '{}' not found.\n\
+            {}\n\
+            Did you mean: {}?\n\
+            Common path variables: {}",
+            var,
+            os_info,
+            suggestions.join(", "),
+            COMMON_PATH_VARIABLES.join(", ")
+        )
+    }
+}
+
 /// Handles PATH command operations including add, remove, clean, dedupe, check, list, and move.
 ///
 /// # Arguments
@@ -30,19 +85,22 @@ pub fn handle_path_command(action: Option<PathAction>, check: bool, var: &str, p
     manager.load_all()?;
 
     // Get the PATH variable
-    let path_var = manager.get(var).ok_or_else(|| eyre!("Variable '{}' not found", var))?;
+    let path_var = manager
+        .get(var)
+        .ok_or_else(|| eyre!("{}", get_path_variable_error_message(var, &manager)))?;
 
     let mut path_mgr = PathManager::new(&path_var.value);
 
-    // If no action specified, list PATH entries
+    // If no action specified, list PATH entries and return early
     if action.is_none() {
         if check {
             handle_path_check(&path_mgr, true);
         }
         handle_path_list(&path_mgr, false, false);
+        return Ok(());
     }
 
-    let command = action.expect("Action should be Some if we reach here");
+    let command = action.expect("We should not reach here if PathAction is None");
     match command {
         PathAction::Add {
             directory,
