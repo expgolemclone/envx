@@ -53,6 +53,13 @@ colored = "3.0.0"
 
 # Platform-specific dependencies (to be used in individual crates)
 winreg = "0.55.0"
+windows-sys = { version = "0.60.2", features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+    "Win32_System_Environment",
+    "Win32_System_Memory",
+    "Win32_UI_WindowsAndMessaging",
+] }
 nix = { version = "0.30.1", features = ["process", "env"] }
 
 [profile.release]

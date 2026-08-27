@@ -1,5 +1,6 @@
 use std::{path::PathBuf, time::Duration};
 
+use crate::ScopeArg;
 use clap::{Args, ValueEnum};
 use color_eyre::Result;
 use envx_core::{ConflictStrategy, EnvVarManager, EnvWatcher, SyncMode, WatchConfig};
@@ -16,6 +17,10 @@ pub enum Direction {
 
 #[derive(Args, Clone)]
 pub struct WatchArgs {
+    /// Environment scope to synchronize
+    #[arg(long, value_enum)]
+    pub scope: ScopeArg,
+
     /// Files or directories to watch (defaults to current directory)
     #[arg(value_name = "PATH")]
     pub paths: Vec<PathBuf>,
@@ -84,6 +89,7 @@ pub fn handle_watch(args: &WatchArgs) -> Result<()> {
             args.paths.clone()
         },
         mode: sync_mode,
+        scope: args.scope.into(),
         auto_reload: true,
         debounce_duration: Duration::from_millis(args.debounce),
         log_changes: !args.quiet,

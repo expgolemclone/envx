@@ -1,4 +1,4 @@
-use crate::EnvVarManager;
+use crate::{EnvScope, EnvVarManager};
 use ahash::AHashMap as HashMap;
 use color_eyre::Result;
 use notify::{RecommendedWatcher, RecursiveMode};
@@ -28,6 +28,8 @@ pub struct WatchConfig {
     pub paths: Vec<PathBuf>,
     /// Sync mode
     pub mode: SyncMode,
+    /// Environment scope to read and mutate
+    pub scope: EnvScope,
     /// Auto-reload on changes
     pub auto_reload: bool,
     /// Debounce duration (to avoid multiple rapid reloads)
@@ -57,6 +59,7 @@ impl Default for WatchConfig {
         Self {
             paths: vec![PathBuf::from(".")],
             mode: SyncMode::FileToSystem,
+            scope: EnvScope::Process,
             auto_reload: true,
             debounce_duration: Duration::from_millis(300),
             patterns: vec![
@@ -345,7 +348,7 @@ impl EnvWatcher {
 
         // Get current state for comparison
         let before_vars: HashMap<String, String> = manager
-            .list()
+            .list(Some(config.scope))
             .into_iter()
             .filter(|v| {
                 variable_filter
@@ -359,12 +362,12 @@ impl EnvWatcher {
         let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
 
         let load_result = match extension {
-            "env" => Self::load_env_file(path, &mut manager, variable_filter),
-            "yaml" | "yml" => Self::load_yaml_file(path, &mut manager, variable_filter),
-            "json" => Self::load_json_file(path, &mut manager, variable_filter),
+            "env" => Self::load_env_file(path, &mut manager, variable_filter, config.scope),
+            "yaml" | "yml" => Self::load_yaml_file(path, &mut manager, variable_filter, config.scope),
+            "json" => Self::load_json_file(path, &mut manager, variable_filter, config.scope),
             _ => {
                 // Try to load as .env format by default
-                Self::load_env_file(path, &mut manager, variable_filter)
+                Self::load_env_file(path, &mut manager, variable_filter, config.scope)
             }
         };
 
@@ -374,7 +377,7 @@ impl EnvWatcher {
         }
 
         // Compare and log changes
-        let after_vars = manager.list();
+        let after_vars = manager.list(Some(config.scope));
         let mut changes_made = false;
 
         for var in after_vars {
@@ -416,7 +419,7 @@ impl EnvWatcher {
 
         // Check for deletions
         for (name, _) in before_vars {
-            if manager.get(&name).is_none() {
+            if manager.get(config.scope, &name).is_none() {
                 Self::log_change(
                     change_log,
                     path.to_path_buf(),
@@ -438,7 +441,12 @@ impl EnvWatcher {
         Ok(())
     }
 
-    fn load_env_file(path: &Path, manager: &mut EnvVarManager, variable_filter: Option<&Vec<String>>) -> Result<()> {
+    fn load_env_file(
+        path: &Path,
+        manager: &mut EnvVarManager,
+        variable_filter: Option<&Vec<String>>,
+        scope: EnvScope,
+    ) -> Result<()> {
         let content = fs::read_to_string(path)?;
 
         for line in content.lines() {
@@ -458,14 +466,19 @@ impl EnvWatcher {
                     }
                 }
 
-                manager.set(key, value, true)?;
+                manager.set(scope, key, value, None)?;
             }
         }
 
         Ok(())
     }
 
-    fn load_yaml_file(path: &Path, manager: &mut EnvVarManager, variable_filter: Option<&Vec<String>>) -> Result<()> {
+    fn load_yaml_file(
+        path: &Path,
+        manager: &mut EnvVarManager,
+        variable_filter: Option<&Vec<String>>,
+        scope: EnvScope,
+    ) -> Result<()> {
         let content = fs::read_to_string(path)?;
         let yaml: serde_yaml::Value = serde_yaml::from_str(&content)?;
 
@@ -479,7 +492,7 @@ impl EnvWatcher {
                         }
                     }
 
-                    manager.set(key_str, value_str, true)?;
+                    manager.set(scope, key_str, value_str, None)?;
                 }
             }
         }
@@ -487,7 +500,12 @@ impl EnvWatcher {
         Ok(())
     }
 
-    fn load_json_file(path: &Path, manager: &mut EnvVarManager, variable_filter: Option<&Vec<String>>) -> Result<()> {
+    fn load_json_file(
+        path: &Path,
+        manager: &mut EnvVarManager,
+        variable_filter: Option<&Vec<String>>,
+        scope: EnvScope,
+    ) -> Result<()> {
         let content = fs::read_to_string(path)?;
         let json: serde_json::Value = serde_json::from_str(&content)?;
 
@@ -501,7 +519,7 @@ impl EnvWatcher {
                         }
                     }
 
-                    manager.set(&key, &value_str, true)?;
+                    manager.set(scope, &key, &value_str, None)?;
                 }
             }
         }
@@ -527,7 +545,7 @@ impl EnvWatcher {
                 let current_snapshot: HashMap<String, String> = manager
                     .lock()
                     .unwrap()
-                    .list()
+                    .list(Some(config.scope))
                     .iter()
                     .filter(|v| {
                         variable_filter
@@ -662,8 +680,12 @@ mod tests {
 
     fn create_test_manager() -> EnvVarManager {
         let mut manager = EnvVarManager::new();
-        manager.set("TEST_VAR", "initial_value", false).unwrap();
-        manager.set("ANOTHER_VAR", "another_value", false).unwrap();
+        manager
+            .set(EnvScope::Process, "TEST_VAR", "initial_value", None)
+            .unwrap();
+        manager
+            .set(EnvScope::Process, "ANOTHER_VAR", "another_value", None)
+            .unwrap();
         manager
     }
 
@@ -671,6 +693,7 @@ mod tests {
         WatchConfig {
             paths: vec![temp_dir.to_path_buf()],
             mode: SyncMode::FileToSystem,
+            scope: EnvScope::Process,
             auto_reload: true,
             debounce_duration: Duration::from_millis(100),
             patterns: vec!["*.env".to_string(), "*.json".to_string(), "*.yaml".to_string()],
@@ -820,12 +843,21 @@ SINGLE_QUOTED='single quoted'
         fs::write(&env_file, content).unwrap();
 
         let mut manager = EnvVarManager::new();
-        EnvWatcher::load_env_file(&env_file, &mut manager, None).unwrap();
+        EnvWatcher::load_env_file(&env_file, &mut manager, None, EnvScope::Process).unwrap();
 
-        assert_eq!(manager.get("TEST_VAR").unwrap().value, "test_value");
-        assert_eq!(manager.get("ANOTHER_VAR").unwrap().value, "another_value");
-        assert_eq!(manager.get("QUOTED_VAR").unwrap().value, "quoted value");
-        assert_eq!(manager.get("SINGLE_QUOTED").unwrap().value, "single quoted");
+        assert_eq!(manager.get(EnvScope::Process, "TEST_VAR").unwrap().value, "test_value");
+        assert_eq!(
+            manager.get(EnvScope::Process, "ANOTHER_VAR").unwrap().value,
+            "another_value"
+        );
+        assert_eq!(
+            manager.get(EnvScope::Process, "QUOTED_VAR").unwrap().value,
+            "quoted value"
+        );
+        assert_eq!(
+            manager.get(EnvScope::Process, "SINGLE_QUOTED").unwrap().value,
+            "single quoted"
+        );
     }
 
     #[test]
@@ -843,12 +875,12 @@ API_SECRET=another_secret
 
         let mut manager = EnvVarManager::new();
         let filter = vec!["API".to_string()];
-        EnvWatcher::load_env_file(&env_file, &mut manager, Some(&filter)).unwrap();
+        EnvWatcher::load_env_file(&env_file, &mut manager, Some(&filter), EnvScope::Process).unwrap();
 
-        assert!(manager.get("API_KEY").is_some());
-        assert!(manager.get("API_SECRET").is_some());
-        assert!(manager.get("TEST_VAR").is_none());
-        assert!(manager.get("DATABASE_URL").is_none());
+        assert!(manager.get(EnvScope::Process, "API_KEY").is_some());
+        assert!(manager.get(EnvScope::Process, "API_SECRET").is_some());
+        assert!(manager.get(EnvScope::Process, "TEST_VAR").is_none());
+        assert!(manager.get(EnvScope::Process, "DATABASE_URL").is_none());
     }
 
     #[test]
@@ -864,11 +896,11 @@ API_SECRET=another_secret
         fs::write(&json_file, content).unwrap();
 
         let mut manager = EnvVarManager::new();
-        EnvWatcher::load_json_file(&json_file, &mut manager, None).unwrap();
+        EnvWatcher::load_json_file(&json_file, &mut manager, None, EnvScope::Process).unwrap();
 
-        assert_eq!(manager.get("TEST_VAR").unwrap().value, "json_value");
-        assert_eq!(manager.get("NUMBER_VAR").unwrap().value, "42");
-        assert_eq!(manager.get("BOOL_VAR").unwrap().value, "true");
+        assert_eq!(manager.get(EnvScope::Process, "TEST_VAR").unwrap().value, "json_value");
+        assert_eq!(manager.get(EnvScope::Process, "NUMBER_VAR").unwrap().value, "42");
+        assert_eq!(manager.get(EnvScope::Process, "BOOL_VAR").unwrap().value, "true");
     }
 
     #[test]
@@ -884,11 +916,14 @@ QUOTED: "quoted yaml"
         fs::write(&yaml_file, content).unwrap();
 
         let mut manager = EnvVarManager::new();
-        EnvWatcher::load_yaml_file(&yaml_file, &mut manager, None).unwrap();
+        EnvWatcher::load_yaml_file(&yaml_file, &mut manager, None, EnvScope::Process).unwrap();
 
-        assert_eq!(manager.get("TEST_VAR").unwrap().value, "yaml_value");
-        assert_eq!(manager.get("NESTED_VAR").unwrap().value, "nested_value");
-        assert_eq!(manager.get("QUOTED").unwrap().value, "quoted yaml");
+        assert_eq!(manager.get(EnvScope::Process, "TEST_VAR").unwrap().value, "yaml_value");
+        assert_eq!(
+            manager.get(EnvScope::Process, "NESTED_VAR").unwrap().value,
+            "nested_value"
+        );
+        assert_eq!(manager.get(EnvScope::Process, "QUOTED").unwrap().value, "quoted yaml");
     }
 
     #[test]
@@ -920,6 +955,7 @@ QUOTED: "quoted yaml"
         let config = WatchConfig {
             paths: vec![env_file.clone()],
             mode: SyncMode::FileToSystem,
+            scope: EnvScope::Process,
             auto_reload: true,
             debounce_duration: Duration::from_millis(50),
             patterns: vec!["*.env".to_string()],
@@ -956,6 +992,7 @@ QUOTED: "quoted yaml"
         let config = WatchConfig {
             paths: vec![temp_dir.path().to_path_buf()],
             mode: SyncMode::WatchOnly,
+            scope: EnvScope::Process,
             auto_reload: true,
             debounce_duration: Duration::from_millis(50),
             patterns: vec!["*.env".to_string()],
@@ -979,6 +1016,7 @@ QUOTED: "quoted yaml"
         let config = WatchConfig {
             paths: vec![temp_dir.path().to_path_buf()],
             mode: SyncMode::SystemToFile,
+            scope: EnvScope::Process,
             auto_reload: true,
             debounce_duration: Duration::from_millis(50),
             patterns: vec!["*.env".to_string()],
@@ -1034,6 +1072,7 @@ QUOTED: "quoted yaml"
         let config = WatchConfig {
             paths: vec![env_file.clone()],
             mode: SyncMode::FileToSystem,
+            scope: EnvScope::Process,
             auto_reload: false, // Disabled
             debounce_duration: Duration::from_millis(50),
             patterns: vec!["*.env".to_string()],
@@ -1056,7 +1095,7 @@ QUOTED: "quoted yaml"
         );
 
         assert!(result.is_ok());
-        assert!(manager_arc.lock().unwrap().get("TEST").is_none());
+        assert!(manager_arc.lock().unwrap().get(EnvScope::Process, "TEST").is_none());
     }
 
     #[test]
@@ -1067,6 +1106,7 @@ QUOTED: "quoted yaml"
         let config = WatchConfig {
             paths: vec![sync_file.clone()],
             mode: SyncMode::Bidirectional,
+            scope: EnvScope::Process,
             auto_reload: true,
             debounce_duration: Duration::from_millis(50),
             patterns: vec!["*.env".to_string()],

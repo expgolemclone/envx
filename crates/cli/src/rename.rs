@@ -1,10 +1,15 @@
-use clap::{Args, arg};
+use crate::ScopeArg;
+use clap::Args;
 use color_eyre::Result;
 use comfy_table::{Table, presets::UTF8_FULL};
 use envx_core::{EnvVarManager, env::split_wildcard_pattern};
 
 #[derive(Args)]
 pub struct RenameArgs {
+    /// Environment scope to mutate
+    #[arg(long, value_enum)]
+    pub scope: ScopeArg,
+
     /// Pattern to match (supports wildcards with *)
     pub pattern: String,
 
@@ -29,10 +34,11 @@ pub struct RenameArgs {
 pub fn handle_rename(args: &RenameArgs) -> Result<()> {
     let mut manager = EnvVarManager::new();
     manager.load_all()?;
+    let scope = args.scope.into();
 
     if args.dry_run {
         // Show what would be renamed
-        let preview = preview_rename(&manager, &args.pattern, &args.replacement)?;
+        let preview = preview_rename(&manager, scope, &args.pattern, &args.replacement)?;
 
         if preview.is_empty() {
             println!("No variables match the pattern '{}'", args.pattern);
@@ -41,17 +47,17 @@ pub fn handle_rename(args: &RenameArgs) -> Result<()> {
 
             let mut table = Table::new();
             table.load_preset(UTF8_FULL);
-            table.set_header(vec!["Current Name", "New Name", "Value"]);
+            table.set_header(vec!["Current Name", "New Name"]);
 
-            for (old, new, value) in preview {
-                table.add_row(vec![old, new, value]);
+            for (old, new) in preview {
+                table.add_row(vec![old, new]);
             }
 
             println!("{table}");
             println!("\nUse without --dry-run to apply changes");
         }
     } else {
-        let renamed = manager.rename(&args.pattern, &args.replacement)?;
+        let renamed = manager.rename(scope, &args.pattern, &args.replacement)?;
 
         if renamed.is_empty() {
             println!("No variables match the pattern '{}'", args.pattern);
@@ -76,25 +82,30 @@ pub fn handle_rename(args: &RenameArgs) -> Result<()> {
     Ok(())
 }
 
-fn preview_rename(manager: &EnvVarManager, pattern: &str, replacement: &str) -> Result<Vec<(String, String, String)>> {
+fn preview_rename(
+    manager: &EnvVarManager,
+    scope: envx_core::EnvScope,
+    pattern: &str,
+    replacement: &str,
+) -> Result<Vec<(String, String)>> {
     let mut preview = Vec::new();
 
     if pattern.contains('*') {
         let (prefix, suffix) = split_wildcard_pattern(pattern)?;
         let (new_prefix, new_suffix) = split_wildcard_pattern(replacement)?;
 
-        for var in manager.list() {
+        for var in manager.list(Some(scope)) {
             if var.name.starts_with(&prefix)
                 && var.name.ends_with(&suffix)
                 && var.name.len() >= prefix.len() + suffix.len()
             {
                 let middle = &var.name[prefix.len()..var.name.len() - suffix.len()];
                 let new_name = format!("{new_prefix}{middle}{new_suffix}");
-                preview.push((var.name.clone(), new_name, var.value.clone()));
+                preview.push((var.name.clone(), new_name));
             }
         }
-    } else if let Some(var) = manager.get(pattern) {
-        preview.push((var.name.clone(), replacement.to_string(), var.value.clone()));
+    } else if let Some(var) = manager.get(scope, pattern) {
+        preview.push((var.name.clone(), replacement.to_string()));
     }
 
     Ok(preview)

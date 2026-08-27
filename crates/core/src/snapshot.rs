@@ -9,7 +9,7 @@ pub struct Snapshot {
     pub name: String,
     pub description: Option<String>,
     pub created_at: DateTime<Utc>,
-    pub variables: HashMap<String, EnvVar>,
+    pub variables: Vec<EnvVar>,
     pub metadata: HashMap<String, String>,
 }
 
@@ -39,18 +39,17 @@ impl Snapshot {
             name,
             description,
             created_at: Utc::now(),
-            variables: HashMap::new(),
+            variables: Vec::new(),
             metadata: HashMap::new(),
         }
     }
 
     #[must_use]
     pub fn from_vars(name: String, description: Option<String>, vars: Vec<EnvVar>) -> Self {
-        let mut snapshot = Self::new(name, description);
-        for var in vars {
-            snapshot.variables.insert(var.name.clone(), var);
+        Self {
+            variables: vars,
+            ..Self::new(name, description)
         }
-        snapshot
     }
 }
 
@@ -98,13 +97,14 @@ impl Profile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EnvVar, EnvVarSource};
+    use crate::{EnvScope, EnvVar};
 
     fn create_test_env_var(name: &str, value: &str) -> EnvVar {
         EnvVar {
             name: name.to_string(),
             value: value.to_string(),
-            source: EnvVarSource::User,
+            scope: EnvScope::User,
+            kind: crate::EnvValueKind::String,
             modified: Utc::now(),
             original_value: None,
         }
@@ -157,9 +157,7 @@ mod tests {
         let snapshot = Snapshot::from_vars("single-var-snapshot".to_string(), None, vars);
 
         assert_eq!(snapshot.variables.len(), 1);
-        assert!(snapshot.variables.contains_key("TEST_VAR"));
-
-        let stored_var = snapshot.variables.get("TEST_VAR").unwrap();
+        let stored_var = &snapshot.variables[0];
         assert_eq!(stored_var.name, var.name);
         assert_eq!(stored_var.value, var.value);
     }
@@ -178,23 +176,26 @@ mod tests {
         );
 
         assert_eq!(snapshot.variables.len(), 3);
-        assert!(snapshot.variables.contains_key("VAR1"));
-        assert!(snapshot.variables.contains_key("VAR2"));
-        assert!(snapshot.variables.contains_key("VAR3"));
+        assert!(snapshot.variables.iter().any(|variable| variable.name == "VAR1"));
+        assert!(snapshot.variables.iter().any(|variable| variable.name == "VAR2"));
+        assert!(snapshot.variables.iter().any(|variable| variable.name == "VAR3"));
         assert_eq!(snapshot.description, Some("Multiple variables".to_string()));
     }
 
     #[test]
-    fn test_snapshot_from_vars_duplicate_names() {
-        // Test that later values override earlier ones for same variable name
-        let vars = vec![
-            create_test_env_var("DUPLICATE", "first_value"),
-            create_test_env_var("DUPLICATE", "second_value"),
-        ];
-        let snapshot = Snapshot::from_vars("duplicate-test".to_string(), None, vars);
+    fn test_snapshot_preserves_same_name_in_different_scopes() {
+        let user = create_test_env_var("SHARED", "user_value");
+        let mut system = create_test_env_var("SHARED", "system_value");
+        system.scope = EnvScope::System;
+        let snapshot = Snapshot::from_vars("scoped-test".to_string(), None, vec![user, system]);
 
-        assert_eq!(snapshot.variables.len(), 1);
-        assert_eq!(snapshot.variables.get("DUPLICATE").unwrap().value, "second_value");
+        assert_eq!(snapshot.variables.len(), 2);
+        assert!(snapshot.variables.iter().any(|variable| {
+            variable.scope == EnvScope::User && variable.name == "SHARED" && variable.value == "user_value"
+        }));
+        assert!(snapshot.variables.iter().any(|variable| {
+            variable.scope == EnvScope::System && variable.name == "SHARED" && variable.value == "system_value"
+        }));
     }
 
     #[test]
@@ -204,7 +205,7 @@ mod tests {
         snapshot.metadata.insert("key2".to_string(), "value2".to_string());
 
         let var = create_test_env_var("TEST_VAR", "test_value");
-        snapshot.variables.insert(var.name.clone(), var);
+        snapshot.variables.push(var);
 
         // Serialize to JSON
         let json = serde_json::to_string(&snapshot).expect("Failed to serialize snapshot to JSON");
@@ -240,14 +241,14 @@ mod tests {
     #[test]
     fn test_snapshot_from_vars_preserves_all_env_var_fields() {
         let mut var = create_test_env_var("FULL_VAR", "full_value");
-        var.source = EnvVarSource::System;
+        var.scope = EnvScope::System;
         var.original_value = Some("original".to_string());
 
         let vars = vec![var];
         let snapshot = Snapshot::from_vars("preserve-test".to_string(), None, vars);
 
-        let stored_var = snapshot.variables.get("FULL_VAR").unwrap();
-        assert_eq!(stored_var.source, EnvVarSource::System);
+        let stored_var = snapshot.variables.first().unwrap();
+        assert_eq!(stored_var.scope, EnvScope::System);
         assert_eq!(stored_var.original_value, Some("original".to_string()));
     }
 
@@ -270,9 +271,7 @@ mod tests {
     #[test]
     fn test_snapshot_clone() {
         let mut original = Snapshot::new("original".to_string(), Some("Original snapshot".to_string()));
-        original
-            .variables
-            .insert("VAR1".to_string(), create_test_env_var("VAR1", "value1"));
+        original.variables.push(create_test_env_var("VAR1", "value1"));
         original.metadata.insert("key".to_string(), "value".to_string());
 
         let cloned = original.clone();

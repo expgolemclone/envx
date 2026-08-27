@@ -5,8 +5,7 @@ use clap::ValueEnum;
 use color_eyre::Result;
 use comfy_table::Table;
 use comfy_table::presets::UTF8_FULL;
-use envx_core::EnvVarManager;
-use envx_core::EnvVarSource;
+use envx_core::{EnvScope, EnvVarManager};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -29,17 +28,14 @@ pub enum SourceFilter {
     User,
     #[value(name = "process")]
     Process,
-    #[value(name = "shell")]
-    Shell,
 }
 
-impl From<SourceFilter> for EnvVarSource {
+impl From<SourceFilter> for EnvScope {
     fn from(filter: SourceFilter) -> Self {
         match filter {
-            SourceFilter::System => EnvVarSource::System,
-            SourceFilter::User => EnvVarSource::User,
-            SourceFilter::Process => EnvVarSource::Process,
-            SourceFilter::Shell => EnvVarSource::Shell,
+            SourceFilter::System => EnvScope::System,
+            SourceFilter::User => EnvScope::User,
+            SourceFilter::Process => EnvScope::Process,
         }
     }
 }
@@ -58,9 +54,9 @@ pub struct MonitorArgs {
     #[arg(long)]
     pub changes_only: bool,
 
-    /// Filter by source
+    /// Filter by scope
     #[arg(short, long, value_enum)]
-    pub source: Option<SourceFilter>,
+    pub scope: Option<SourceFilter>,
 
     /// Output format
     #[arg(short, long, value_enum, default_value = "live")]
@@ -77,6 +73,10 @@ pub struct MonitorArgs {
     /// Export report on exit
     #[arg(long)]
     pub export_report: Option<PathBuf>,
+
+    /// Reveal variable values in terminal and output files
+    #[arg(long)]
+    pub reveal: bool,
 }
 
 struct MonitorState {
@@ -118,7 +118,7 @@ pub fn handle_monitor(args: MonitorArgs) -> Result<()> {
     print_monitor_header(&args);
 
     if args.show_initial {
-        print_initial_state(&state.initial);
+        print_initial_state(&state.initial, args.reveal);
     }
 
     // Set up Ctrl+C handler
@@ -148,7 +148,7 @@ pub fn handle_monitor(args: MonitorArgs) -> Result<()> {
                 state.changes.push(change.clone());
 
                 if let Some(log_path) = &args.log {
-                    log_change(log_path, &change)?;
+                    log_change(log_path, &change, args.reveal)?;
                 }
             }
         }
@@ -161,7 +161,7 @@ pub fn handle_monitor(args: MonitorArgs) -> Result<()> {
 
     // Generate final report if requested
     if let Some(report_path) = args.export_report {
-        export_report(&state, &report_path)?;
+        export_report(&state, &report_path, args.reveal)?;
         println!("\n📊 Report exported to: {}", report_path.display());
     }
 
@@ -172,15 +172,15 @@ pub fn handle_monitor(args: MonitorArgs) -> Result<()> {
 
 fn collect_variables(manager: &EnvVarManager, args: &MonitorArgs) -> HashMap<String, String> {
     manager
-        .list()
+        .list(args.scope.clone().map(Into::into))
         .into_iter()
         .filter(|var| {
             // Filter by variable names if specified
             (args.vars.is_empty() || args.vars.iter().any(|v| var.name.contains(v))) &&
-            // Filter by source if specified
-            (args.source.is_none() || args.source.as_ref().map(|s| EnvVarSource::from(s.clone())) == Some(var.source.clone()))
+            // Filter by scope if specified
+            (args.scope.is_none() || args.scope.as_ref().map(|s| EnvScope::from(s.clone())) == Some(var.scope))
         })
-        .map(|var| (var.name.clone(), var.value.clone()))
+        .map(|var| (format!("{}:{}", var.scope, var.name), var.value.clone()))
         .collect()
 }
 
@@ -232,7 +232,7 @@ fn detect_changes(state: &MonitorState) -> Vec<ChangeRecord> {
 fn display_changes(changes: &[ChangeRecord], args: &MonitorArgs) {
     match args.format {
         OutputFormat::Live => {
-            for change in changes {
+            for change in changes.iter().map(|change| output_change(change, args.reveal)) {
                 let time = change.timestamp.format("%H:%M:%S");
                 match change.change_type.as_str() {
                     "added" => {
@@ -265,7 +265,7 @@ fn display_changes(changes: &[ChangeRecord], args: &MonitorArgs) {
             }
         }
         OutputFormat::Compact => {
-            for change in changes {
+            for change in changes.iter().map(|change| output_change(change, args.reveal)) {
                 println!(
                     "{} {} {}",
                     change.timestamp.format("%Y-%m-%d %H:%M:%S"),
@@ -275,8 +275,8 @@ fn display_changes(changes: &[ChangeRecord], args: &MonitorArgs) {
             }
         }
         OutputFormat::JsonLines => {
-            for change in changes {
-                if let Ok(json) = serde_json::to_string(change) {
+            for change in changes.iter().map(|change| output_change(change, args.reveal)) {
+                if let Ok(json) = serde_json::to_string(&change) {
                     println!("{json}");
                 }
             }
@@ -284,13 +284,13 @@ fn display_changes(changes: &[ChangeRecord], args: &MonitorArgs) {
     }
 }
 
-fn log_change(path: &PathBuf, change: &ChangeRecord) -> Result<()> {
+fn log_change(path: &PathBuf, change: &ChangeRecord, reveal: bool) -> Result<()> {
     use std::fs::OpenOptions;
     use std::io::Write;
 
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
 
-    writeln!(file, "{}", serde_json::to_string(change)?)?;
+    writeln!(file, "{}", serde_json::to_string(&output_change(change, reveal))?)?;
     Ok(())
 }
 
@@ -304,8 +304,8 @@ fn print_monitor_header(args: &MonitorArgs) {
         println!("Monitoring: {}", args.vars.join(", "));
     }
 
-    if let Some(source) = &args.source {
-        println!("Source filter: {source:?}");
+    if let Some(scope) = &args.scope {
+        println!("Scope filter: {scope:?}");
     }
 
     println!("Check interval: {} seconds", args.interval);
@@ -313,7 +313,7 @@ fn print_monitor_header(args: &MonitorArgs) {
     println!("Press Ctrl+C to stop\n");
 }
 
-fn print_initial_state(vars: &HashMap<String, String>) {
+fn print_initial_state(vars: &HashMap<String, String>, reveal: bool) {
     if vars.is_empty() {
         println!("No variables match the criteria\n");
         return;
@@ -324,12 +324,12 @@ fn print_initial_state(vars: &HashMap<String, String>) {
     table.set_header(vec!["Variable", "Initial Value"]);
 
     for (name, value) in vars {
-        let display_value = if value.len() > 50 {
-            format!("{}...", &value[..47])
-        } else {
+        let display_value = if reveal {
             value.clone()
+        } else {
+            "[REDACTED]".to_string()
         };
-        table.add_row(vec![name.clone(), display_value]);
+        table.add_row(vec![safe_scoped_name(name), display_value]);
     }
 
     println!("Initial State:\n{table}\n");
@@ -376,7 +376,7 @@ fn format_duration(duration: chrono::Duration) -> String {
     }
 }
 
-fn export_report(state: &MonitorState, path: &PathBuf) -> Result<()> {
+fn export_report(state: &MonitorState, path: &PathBuf, reveal: bool) -> Result<()> {
     #[derive(Serialize)]
     struct Report {
         start_time: chrono::DateTime<Local>,
@@ -398,7 +398,11 @@ fn export_report(state: &MonitorState, path: &PathBuf) -> Result<()> {
         duration_seconds: Local::now().signed_duration_since(state.start_time).num_seconds(),
         total_changes: state.changes.len(),
         changes_by_type,
-        changes: state.changes.clone(),
+        changes: state
+            .changes
+            .iter()
+            .map(|change| output_change(change, reveal))
+            .collect(),
     };
 
     let json = serde_json::to_string_pretty(&report)?;
@@ -407,61 +411,77 @@ fn export_report(state: &MonitorState, path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
+fn output_change(change: &ChangeRecord, reveal: bool) -> ChangeRecord {
+    ChangeRecord {
+        timestamp: change.timestamp,
+        variable: safe_scoped_name(&change.variable),
+        change_type: change.change_type.clone(),
+        old_value: change.old_value.as_ref().map(|value| {
+            if reveal {
+                value.clone()
+            } else {
+                "[REDACTED]".to_string()
+            }
+        }),
+        new_value: change.new_value.as_ref().map(|value| {
+            if reveal {
+                value.clone()
+            } else {
+                "[REDACTED]".to_string()
+            }
+        }),
+    }
+}
+
+fn safe_scoped_name(name: &str) -> String {
+    name.split_once(':').map_or_else(
+        || crate::list::safe_name(name),
+        |(scope, variable)| format!("{scope}:{}", crate::list::safe_name(variable)),
+    )
+}
+
 // Add this at the end of the file
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ahash::AHashMap as HashMap;
-    use envx_core::{EnvVar, EnvVarManager};
+    use envx_core::{EnvKey, EnvValueKind, EnvVar, EnvVarManager};
 
     // Helper function to create a test environment variable
-    fn create_test_env_var(name: &str, value: &str, source: EnvVarSource) -> EnvVar {
+    fn create_test_env_var(name: &str, value: &str, scope: EnvScope) -> EnvVar {
         EnvVar {
             name: name.to_string(),
             value: value.to_string(),
-            source,
+            scope,
+            kind: EnvValueKind::String,
             modified: chrono::Utc::now(),
             original_value: None,
         }
+    }
+
+    fn insert_test_env_var(manager: &mut EnvVarManager, name: &str, value: &str, scope: EnvScope) {
+        manager
+            .vars
+            .insert(EnvKey::new(scope, name), create_test_env_var(name, value, scope));
     }
 
     // Helper function to create a test manager with predefined variables
     fn create_test_manager() -> EnvVarManager {
         let mut manager = EnvVarManager::new();
 
-        // Add test variables with different sources
-        manager.vars.insert(
-            "SYSTEM_VAR".to_string(),
-            create_test_env_var("SYSTEM_VAR", "system_value", EnvVarSource::System),
-        );
-        manager.vars.insert(
-            "USER_VAR".to_string(),
-            create_test_env_var("USER_VAR", "user_value", EnvVarSource::User),
-        );
-        manager.vars.insert(
-            "PROCESS_VAR".to_string(),
-            create_test_env_var("PROCESS_VAR", "process_value", EnvVarSource::Process),
-        );
-        manager.vars.insert(
-            "SHELL_VAR".to_string(),
-            create_test_env_var("SHELL_VAR", "shell_value", EnvVarSource::Shell),
-        );
-        manager.vars.insert(
-            "APP_VAR".to_string(),
-            create_test_env_var(
-                "APP_VAR",
-                "app_value",
-                EnvVarSource::Application("test_app".to_string()),
-            ),
-        );
-        manager.vars.insert(
-            "TEST_API_KEY".to_string(),
-            create_test_env_var("TEST_API_KEY", "secret123", EnvVarSource::User),
-        );
-        manager.vars.insert(
-            "DATABASE_URL".to_string(),
-            create_test_env_var("DATABASE_URL", "postgres://localhost:5432", EnvVarSource::User),
+        // Add test variables with different scopes.
+        insert_test_env_var(&mut manager, "SYSTEM_VAR", "system_value", EnvScope::System);
+        insert_test_env_var(&mut manager, "USER_VAR", "user_value", EnvScope::User);
+        insert_test_env_var(&mut manager, "PROCESS_VAR", "process_value", EnvScope::Process);
+        insert_test_env_var(&mut manager, "SHELL_VAR", "shell_value", EnvScope::Process);
+        insert_test_env_var(&mut manager, "APP_VAR", "app_value", EnvScope::Process);
+        insert_test_env_var(&mut manager, "TEST_API_KEY", "secret123", EnvScope::User);
+        insert_test_env_var(
+            &mut manager,
+            "DATABASE_URL",
+            "postgres://localhost:5432",
+            EnvScope::User,
         );
 
         manager
@@ -474,25 +494,26 @@ mod tests {
             vars: vec![],
             log: None,
             changes_only: false,
-            source: None,
+            scope: None,
             format: OutputFormat::Live,
             interval: 2,
             show_initial: false,
             export_report: None,
+            reveal: false,
         };
 
         let result = collect_variables(&manager, &args);
 
         // Should collect all variables
         assert_eq!(result.len(), 7);
-        assert_eq!(result.get("SYSTEM_VAR"), Some(&"system_value".to_string()));
-        assert_eq!(result.get("USER_VAR"), Some(&"user_value".to_string()));
-        assert_eq!(result.get("PROCESS_VAR"), Some(&"process_value".to_string()));
-        assert_eq!(result.get("SHELL_VAR"), Some(&"shell_value".to_string()));
-        assert_eq!(result.get("APP_VAR"), Some(&"app_value".to_string()));
-        assert_eq!(result.get("TEST_API_KEY"), Some(&"secret123".to_string()));
+        assert_eq!(result.get("system:SYSTEM_VAR"), Some(&"system_value".to_string()));
+        assert_eq!(result.get("user:USER_VAR"), Some(&"user_value".to_string()));
+        assert_eq!(result.get("process:PROCESS_VAR"), Some(&"process_value".to_string()));
+        assert_eq!(result.get("process:SHELL_VAR"), Some(&"shell_value".to_string()));
+        assert_eq!(result.get("process:APP_VAR"), Some(&"app_value".to_string()));
+        assert_eq!(result.get("user:TEST_API_KEY"), Some(&"secret123".to_string()));
         assert_eq!(
-            result.get("DATABASE_URL"),
+            result.get("user:DATABASE_URL"),
             Some(&"postgres://localhost:5432".to_string())
         );
     }
@@ -504,23 +525,24 @@ mod tests {
             vars: vec!["API".to_string(), "DATABASE".to_string()],
             log: None,
             changes_only: false,
-            source: None,
+            scope: None,
             format: OutputFormat::Live,
             interval: 2,
             show_initial: false,
             export_report: None,
+            reveal: false,
         };
 
         let result = collect_variables(&manager, &args);
 
         // Should only collect variables containing "API" or "DATABASE"
         assert_eq!(result.len(), 2);
-        assert_eq!(result.get("TEST_API_KEY"), Some(&"secret123".to_string()));
+        assert_eq!(result.get("user:TEST_API_KEY"), Some(&"secret123".to_string()));
         assert_eq!(
-            result.get("DATABASE_URL"),
+            result.get("user:DATABASE_URL"),
             Some(&"postgres://localhost:5432".to_string())
         );
-        assert!(!result.contains_key("SYSTEM_VAR"));
+        assert!(!result.contains_key("system:SYSTEM_VAR"));
     }
 
     #[test]
@@ -530,25 +552,26 @@ mod tests {
             vars: vec![],
             log: None,
             changes_only: false,
-            source: Some(SourceFilter::User),
+            scope: Some(SourceFilter::User),
             format: OutputFormat::Live,
             interval: 2,
             show_initial: false,
             export_report: None,
+            reveal: false,
         };
 
         let result = collect_variables(&manager, &args);
 
         // Should only collect User source variables
         assert_eq!(result.len(), 3);
-        assert_eq!(result.get("USER_VAR"), Some(&"user_value".to_string()));
-        assert_eq!(result.get("TEST_API_KEY"), Some(&"secret123".to_string()));
+        assert_eq!(result.get("user:USER_VAR"), Some(&"user_value".to_string()));
+        assert_eq!(result.get("user:TEST_API_KEY"), Some(&"secret123".to_string()));
         assert_eq!(
-            result.get("DATABASE_URL"),
+            result.get("user:DATABASE_URL"),
             Some(&"postgres://localhost:5432".to_string())
         );
-        assert!(!result.contains_key("SYSTEM_VAR"));
-        assert!(!result.contains_key("PROCESS_VAR"));
+        assert!(!result.contains_key("system:SYSTEM_VAR"));
+        assert!(!result.contains_key("process:PROCESS_VAR"));
     }
 
     #[test]
@@ -558,18 +581,19 @@ mod tests {
             vars: vec!["VAR".to_string()],
             log: None,
             changes_only: false,
-            source: Some(SourceFilter::System),
+            scope: Some(SourceFilter::System),
             format: OutputFormat::Live,
             interval: 2,
             show_initial: false,
             export_report: None,
+            reveal: false,
         };
 
         let result = collect_variables(&manager, &args);
 
         // Should only collect System source variables containing "VAR"
         assert_eq!(result.len(), 1);
-        assert_eq!(result.get("SYSTEM_VAR"), Some(&"system_value".to_string()));
+        assert_eq!(result.get("system:SYSTEM_VAR"), Some(&"system_value".to_string()));
     }
 
     #[test]
@@ -579,11 +603,12 @@ mod tests {
             vars: vec!["NONEXISTENT".to_string()],
             log: None,
             changes_only: false,
-            source: None,
+            scope: None,
             format: OutputFormat::Live,
             interval: 2,
             show_initial: false,
             export_report: None,
+            reveal: false,
         };
 
         let result = collect_variables(&manager, &args);
@@ -611,6 +636,22 @@ mod tests {
 
         // No changes should be detected
         assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn output_is_redacted_and_invalid_names_are_sanitized_by_default() {
+        let change = ChangeRecord {
+            timestamp: Local::now(),
+            variable: "user:TOKEN=embedded-secret".to_string(),
+            change_type: "modified".to_string(),
+            old_value: Some("old-secret".to_string()),
+            new_value: Some("new-secret".to_string()),
+        };
+
+        let output = output_change(&change, false);
+        assert_eq!(output.variable, "user:TOKEN=<redacted>");
+        assert_eq!(output.old_value.as_deref(), Some("[REDACTED]"));
+        assert_eq!(output.new_value.as_deref(), Some("[REDACTED]"));
     }
 
     #[test]

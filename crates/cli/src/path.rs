@@ -1,359 +1,189 @@
-use std::{io::Write, path::Path};
-
 use crate::PathAction;
 use color_eyre::Result;
 use color_eyre::eyre::eyre;
-use envx_core::{EnvVarManager, PathManager};
+use envx_core::{EnvScope, EnvVarManager, PathManager};
 
-const COMMON_PATH_VARIABLES: &[&str] = &["PATH", "PYTHONPATH", "CLASSPATH", "LD_LIBRARY_PATH", "LIBRARY_PATH"];
-
-fn get_path_variable_error_message(var: &str, manager: &EnvVarManager) -> String {
-    let mut suggestions = Vec::new();
-
-    // On Windows, check for case-insensitive matches
-    if cfg!(windows) {
-        // Check all environment variables for case-insensitive matches
-        for env_var in manager.list() {
-            if env_var.name.to_lowercase() == var.to_lowercase() && env_var.name != var {
-                suggestions.push(env_var.name.clone());
-            }
-        }
-    }
-
-    // Also check common path variables for typos/case issues
-    for &common_var in COMMON_PATH_VARIABLES {
-        if common_var.to_lowercase() == var.to_lowercase()
-            && common_var != var
-            && !suggestions.contains(&common_var.to_string())
-        {
-            suggestions.push(common_var.to_string());
-        }
-    }
-
-    let os_info = if cfg!(windows) {
-        "On Windows, PATH variable names are case-insensitive."
-    } else {
-        "On Unix/Linux systems, PATH variable names are case-sensitive."
-    };
-
-    if suggestions.is_empty() {
-        format!(
-            "Environment variable '{}' not found.\n\
-            {}\n\
-            This variable might not be set in your environment.\n\
-            Common path variables: {}",
-            var,
-            os_info,
-            COMMON_PATH_VARIABLES.join(", ")
-        )
-    } else {
-        format!(
-            "Environment variable '{}' not found.\n\
-            {}\n\
-            Did you mean: {}?\n\
-            Common path variables: {}",
-            var,
-            os_info,
-            suggestions.join(", "),
-            COMMON_PATH_VARIABLES.join(", ")
-        )
-    }
-}
-
-/// Handles PATH command operations including add, remove, clean, dedupe, check, list, and move.
-///
-/// # Arguments
-/// * `action` - The specific PATH action to perform, or None to list entries
-/// * `check` - Whether to check for invalid entries when listing
-/// * `var` - The environment variable name (typically "PATH")
-/// * `permanent` - Whether to make changes permanent to the system
+/// Executes a PATH inspection or exact-scope mutation.
 ///
 /// # Errors
-/// Returns an error if:
-/// - The specified environment variable is not found
-/// - File system operations fail (creating directories, reading/writing)
-/// - Invalid input is provided for move operations
-/// - Environment variable operations fail
 ///
-/// # Panics
-/// Panics if `action` is `None` but the function logic expects it to be `Some`.
-/// This should not happen in normal usage as the logic handles the `None` case before
-/// calling `expect()`.
+/// Returns an error when loading, expansion, validation, backup, or persistence fails.
 #[allow(clippy::too_many_lines)]
-pub fn handle_path_command(action: Option<PathAction>, check: bool, var: &str, permanent: bool) -> Result<()> {
+pub fn handle_path_command(action: Option<PathAction>, scope: EnvScope, name: &str, apply: bool) -> Result<()> {
     let mut manager = EnvVarManager::new();
     manager.load_all()?;
+    let variable = manager.get(scope, name).cloned().ok_or_else(|| {
+        eyre!(
+            "Environment variable '{}' was not found in {scope} scope",
+            crate::list::safe_name(name)
+        )
+    })?;
+    let mut paths = PathManager::new(&variable.value);
 
-    // Get the PATH variable
-    let path_var = manager
-        .get(var)
-        .ok_or_else(|| eyre!("{}", get_path_variable_error_message(var, &manager)))?;
-
-    let mut path_mgr = PathManager::new(&path_var.value);
-
-    // If no action specified, list PATH entries and return early
-    if action.is_none() {
-        if check {
-            handle_path_check(&path_mgr, true);
-        }
-        handle_path_list(&path_mgr, false, false);
-        return Ok(());
-    }
-
-    let command = action.expect("We should not reach here if PathAction is None");
-    match command {
-        PathAction::Add {
+    match action {
+        None => list(&paths, false, false)?,
+        Some(PathAction::List { numbered, check }) => list(&paths, numbered, check)?,
+        Some(PathAction::Check { verbose }) => check(&paths, verbose)?,
+        Some(PathAction::Add {
             directory,
             first,
             create,
-        } => {
-            let path = Path::new(&directory);
-
-            // Check if directory exists
-            if !path.exists() {
-                if create {
-                    std::fs::create_dir_all(path)?;
-                    println!("Created directory: {directory}");
-                } else if !path.exists() {
-                    eprintln!("Warning: Directory does not exist: {directory}");
-                    print!("Add anyway? [y/N]: ");
-                    std::io::stdout().flush()?;
-
-                    let mut input = String::new();
-                    std::io::stdin().read_line(&mut input)?;
-
-                    if !input.trim().eq_ignore_ascii_case("y") {
-                        return Ok(());
-                    }
-                }
-            }
-
-            // Check if already in PATH
-            if path_mgr.contains(&directory) {
-                println!("Directory already in {var}: {directory}");
-                return Ok(());
-            }
-
-            // Add to PATH
-            if first {
-                path_mgr.add_first(directory.clone());
-                println!("Added to beginning of {var}: {directory}");
-            } else {
-                path_mgr.add_last(directory.clone());
-                println!("Added to end of {var}: {directory}");
-            }
-
-            // Save changes
-            let new_value = path_mgr.to_string();
-            manager.set(var, &new_value, permanent)?;
-        }
-
-        PathAction::Remove { directory, all } => {
-            let removed = if all {
-                path_mgr.remove_all(&directory)
-            } else {
-                path_mgr.remove_first(&directory)
-            };
-
-            if removed > 0 {
-                println!("Removed {removed} occurrence(s) of: {directory}");
-                let new_value = path_mgr.to_string();
-                manager.set(var, &new_value, permanent)?;
-            } else {
-                println!("Directory not found in {var}: {directory}");
-            }
-        }
-
-        PathAction::Clean { dedupe, dry_run } => {
-            let invalid = path_mgr.get_invalid();
-            let duplicates = if dedupe { path_mgr.get_duplicates() } else { vec![] };
-
-            if invalid.is_empty() && duplicates.is_empty() {
-                println!("No invalid or duplicate entries found in {var}");
-                return Ok(());
-            }
-
-            if !invalid.is_empty() {
-                println!("Invalid/non-existent paths to remove:");
-                for path in &invalid {
-                    println!("  - {path}");
-                }
-            }
-
-            if !duplicates.is_empty() {
-                println!("Duplicate paths to remove:");
-                for path in &duplicates {
-                    println!("  - {path}");
-                }
-            }
-
-            if dry_run {
-                println!("\n(Dry run - no changes made)");
-            } else {
-                let removed_invalid = path_mgr.remove_invalid();
-                let removed_dupes = if dedupe {
-                    path_mgr.deduplicate(false) // Keep last by default
+        }) => {
+            let resolved = PathManager::resolved_path(&directory)?;
+            if !resolved.exists() {
+                if create && apply {
+                    std::fs::create_dir_all(&resolved)?;
+                } else if create {
+                    println!("Would create '{}'.", resolved.display());
                 } else {
-                    0
-                };
-
-                println!("Removed {removed_invalid} invalid and {removed_dupes} duplicate entries");
-                let new_value = path_mgr.to_string();
-                manager.set(var, &new_value, permanent)?;
+                    return Err(eyre!("Directory '{}' does not exist", resolved.display()));
+                }
+            }
+            if paths.contains(&directory)? {
+                return Err(eyre!(
+                    "Directory is already present in {scope} {}",
+                    crate::list::safe_name(name)
+                ));
+            }
+            if first {
+                paths.add_first(directory.clone());
+            } else {
+                paths.add_last(directory.clone());
+            }
+            persist(&mut manager, scope, name, &paths, apply)?;
+            println!("{} add '{}'.", action_word(apply), directory);
+        }
+        Some(PathAction::Remove { directory, all }) => {
+            let removed = if all {
+                paths.remove_all(&directory)?
+            } else {
+                paths.remove_first(&directory)?
+            };
+            if removed == 0 {
+                return Err(eyre!(
+                    "Directory is not present in {scope} {}",
+                    crate::list::safe_name(name)
+                ));
+            }
+            persist(&mut manager, scope, name, &paths, apply)?;
+            println!(
+                "{} remove {removed} occurrence(s) of '{}'.",
+                action_word(apply),
+                directory
+            );
+        }
+        Some(PathAction::Clean { dedupe }) => {
+            let invalid = paths.get_invalid()?;
+            let duplicates = if dedupe { paths.get_duplicates()? } else { Vec::new() };
+            for path in &invalid {
+                println!("Missing: {path}");
+            }
+            for path in &duplicates {
+                println!("Duplicate: {path}");
+            }
+            if apply {
+                paths.remove_invalid()?;
+                if dedupe {
+                    paths.deduplicate(true)?;
+                }
+            }
+            persist(&mut manager, scope, name, &paths, apply)?;
+            if !apply {
+                println!("Dry run. Add --apply to clean.");
             }
         }
-
-        PathAction::Dedupe { keep_first, dry_run } => {
-            let duplicates = path_mgr.get_duplicates();
-
+        Some(PathAction::Dedupe { keep_first }) => {
+            let duplicates = paths.get_duplicates()?;
+            for path in &duplicates {
+                println!("Duplicate: {path}");
+            }
             if duplicates.is_empty() {
-                println!("No duplicate entries found in {var}");
+                println!("No duplicate entries.");
                 return Ok(());
             }
-
-            println!("Duplicate paths to remove:");
-            for path in &duplicates {
-                println!("  - {path}");
+            if apply {
+                paths.deduplicate(keep_first)?;
             }
-            println!(
-                "Strategy: keep {} occurrence",
-                if keep_first { "first" } else { "last" }
-            );
-
-            if dry_run {
-                println!("\n(Dry run - no changes made)");
-            } else {
-                let removed = path_mgr.deduplicate(keep_first);
-                println!("Removed {removed} duplicate entries");
-                let new_value = path_mgr.to_string();
-                manager.set(var, &new_value, permanent)?;
+            persist(&mut manager, scope, name, &paths, apply)?;
+            if !apply {
+                println!("Dry run. Add --apply to deduplicate.");
             }
         }
-
-        PathAction::Check { verbose } => {
-            handle_path_check(&path_mgr, verbose);
-        }
-
-        PathAction::List { numbered, check } => {
-            handle_path_list(&path_mgr, numbered, check);
-        }
-
-        PathAction::Move { from, to } => {
-            // Parse from (can be index or path)
-            let from_idx = if let Ok(idx) = from.parse::<usize>() {
-                idx
-            } else {
-                path_mgr
-                    .find_index(&from)
-                    .ok_or_else(|| eyre!("Path not found: {}", from))?
+        Some(PathAction::Move { from, to }) => {
+            let from_index = match from.parse::<usize>() {
+                Ok(index) => index,
+                Err(_) => paths
+                    .find_index(&from)?
+                    .ok_or_else(|| eyre!("Path '{from}' was not found"))?,
             };
-
-            // Parse to (can be "first", "last", or index)
-            let to_idx = match to.as_str() {
+            let to_index = match to.as_str() {
                 "first" => 0,
-                "last" => path_mgr.len() - 1,
-                _ => to.parse::<usize>().map_err(|_| eyre!("Invalid position: {}", to))?,
+                "last" => paths.len().checked_sub(1).ok_or_else(|| eyre!("PATH is empty"))?,
+                _ => to.parse::<usize>().map_err(|_| eyre!("Invalid destination '{to}'"))?,
             };
-
-            path_mgr.move_entry(from_idx, to_idx)?;
-            println!("Moved entry from position {from_idx} to {to_idx}");
-
-            let new_value = path_mgr.to_string();
-            manager.set(var, &new_value, permanent)?;
+            paths.move_entry(from_index, to_index)?;
+            persist(&mut manager, scope, name, &paths, apply)?;
+            println!("{} move entry {from_index} to {to_index}.", action_word(apply));
         }
     }
-
+    for id in manager.take_last_backup_ids() {
+        println!("Backup: {id}");
+    }
     Ok(())
 }
 
-fn handle_path_check(path_mgr: &PathManager, verbose: bool) {
-    let entries = path_mgr.entries();
-    let mut issues = Vec::new();
-    let mut valid_count = 0;
-
-    for (idx, entry) in entries.iter().enumerate() {
-        let path = Path::new(entry);
-        let exists = path.exists();
-        let is_dir = path.is_dir();
-
-        if verbose || !exists {
-            let status = if !exists {
-                issues.push(format!("Not found: {entry}"));
-                "❌ NOT FOUND"
-            } else if !is_dir {
-                issues.push(format!("Not a directory: {entry}"));
-                "⚠️  NOT DIR"
-            } else {
-                valid_count += 1;
-                "✓ OK"
-            };
-
-            if verbose {
-                println!("[{idx:3}] {status} - {entry}");
-            }
-        } else if exists && is_dir {
-            valid_count += 1;
-        }
+fn persist(manager: &mut EnvVarManager, scope: EnvScope, name: &str, paths: &PathManager, apply: bool) -> Result<()> {
+    if apply {
+        let kind = manager.get(scope, name).map(|variable| variable.kind);
+        manager.set(scope, name, &paths.to_string(), kind)?;
     }
-
-    // Summary
-    println!("\nPATH Analysis:");
-    println!("  Total entries: {}", entries.len());
-    println!("  Valid entries: {valid_count}");
-
-    let duplicates = path_mgr.get_duplicates();
-    if !duplicates.is_empty() {
-        println!("  Duplicates: {} entries", duplicates.len());
-        if verbose {
-            for dup in &duplicates {
-                println!("    - {dup}");
-            }
-        }
-    }
-
-    let invalid = path_mgr.get_invalid();
-    if !invalid.is_empty() {
-        println!("  Invalid entries: {}", invalid.len());
-        if verbose {
-            for inv in &invalid {
-                println!("    - {inv}");
-            }
-        }
-    }
-
-    if issues.is_empty() {
-        println!("\n✅ No issues found!");
-    } else {
-        println!("\n⚠️  {} issue(s) found", issues.len());
-        if !verbose {
-            println!("Run with --verbose for details");
-        }
-    }
+    Ok(())
 }
 
-fn handle_path_list(path_mgr: &PathManager, numbered: bool, check: bool) {
-    let entries = path_mgr.entries();
-
-    if entries.is_empty() {
-        println!("PATH is empty");
-    }
-
-    for (idx, entry) in entries.iter().enumerate() {
-        let prefix = if numbered { format!("[{idx:3}] ") } else { String::new() };
-
-        let suffix = if check {
-            let path = Path::new(entry);
-            if !path.exists() {
-                " [NOT FOUND]"
-            } else if !path.is_dir() {
-                " [NOT A DIRECTORY]"
-            } else {
-                ""
-            }
+fn list(paths: &PathManager, numbered: bool, verify: bool) -> Result<()> {
+    for (index, path) in paths.entries().iter().enumerate() {
+        let prefix = if numbered {
+            format!("[{index:3}] ")
         } else {
-            ""
+            String::new()
         };
+        if verify {
+            let resolved = PathManager::resolved_path(path)?;
+            if !resolved.exists() {
+                println!("{prefix}{path} [NOT FOUND: {}]", resolved.display());
+                continue;
+            }
+            if !resolved.is_dir() {
+                println!("{prefix}{path} [NOT A DIRECTORY: {}]", resolved.display());
+                continue;
+            }
+        }
+        println!("{prefix}{path}");
+    }
+    Ok(())
+}
 
-        println!("{prefix}{entry}{suffix}");
+fn check(paths: &PathManager, verbose: bool) -> Result<()> {
+    if verbose {
+        list(paths, true, true)?;
+    }
+    println!("PATH entries: {}", paths.len());
+    println!("Duplicates: {}", paths.get_duplicates()?.len());
+    println!("Missing: {}", paths.get_invalid()?.len());
+    Ok(())
+}
+
+const fn action_word(apply: bool) -> &'static str {
+    if apply { "Applied" } else { "Would" }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn action_word_distinguishes_dry_run() {
+        assert_eq!(action_word(false), "Would");
+        assert_eq!(action_word(true), "Applied");
     }
 }

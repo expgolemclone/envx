@@ -31,7 +31,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     match &app.mode {
         Mode::Edit | Mode::Add => draw_edit_dialog(f, app),
         Mode::Confirm(action) => draw_confirm_dialog(f, action),
-        Mode::View(var_name) => draw_view_dialog(f, app, var_name),
+        Mode::View(scope, var_name) => draw_view_dialog(f, app, *scope, var_name),
         _ => {}
     }
 }
@@ -147,7 +147,7 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
             Span::styled("Esc", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             Span::styled(" Cancel", Style::default().fg(Color::DarkGray)),
         ],
-        Mode::View(_) => vec![
+        Mode::View(_, _) => vec![
             Span::styled("Esc", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
             Span::raw("/"),
             Span::styled("q", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
@@ -246,26 +246,21 @@ fn draw_main_content(f: &mut Frame, area: Rect, app: &mut App) {
                 Style::default()
             };
 
-            let source_color = match &var.source {
-                envx_core::EnvVarSource::System => Color::Yellow,
-                envx_core::EnvVarSource::User => Color::Green,
-                envx_core::EnvVarSource::Process => Color::Blue,
-                envx_core::EnvVarSource::Shell => Color::Magenta,
-                envx_core::EnvVarSource::Application(_) => Color::Cyan,
+            let source_color = match var.scope {
+                envx_core::EnvScope::System => Color::Yellow,
+                envx_core::EnvScope::User => Color::Green,
+                envx_core::EnvScope::Process => Color::Blue,
             };
 
             let line = Line::from(vec![
                 Span::styled(
-                    format!("{:<30}", truncate_string(&var.name, 30)),
+                    format!("{:<30}", truncate_string(&safe_name(&var.name), 30)),
                     style.fg(Color::White),
                 ),
                 Span::raw(" │ "),
-                Span::styled(
-                    format!("{:<50}", truncate_string(&var.value, 50)),
-                    style.fg(Color::Gray),
-                ),
+                Span::styled(format!("{:<50}", "[REDACTED]"), style.fg(Color::Gray)),
                 Span::raw(" │ "),
-                Span::styled(format!("{:?}", var.source), style.fg(source_color)),
+                Span::styled(format!("{:?}", var.scope), style.fg(source_color)),
             ]);
 
             ListItem::new(line)
@@ -379,11 +374,14 @@ fn draw_edit_dialog(f: &mut Frame, app: &App) {
     f.render_widget(help, chunks[3]);
 }
 
-fn draw_view_dialog(f: &mut Frame, app: &App, var_name: &str) {
+fn draw_view_dialog(f: &mut Frame, app: &App, scope: envx_core::EnvScope, var_name: &str) {
     let area = centered_rect(90, 90, f.area());
 
     // Find the variable
-    let var = app.filtered_vars.iter().find(|v| v.name == var_name);
+    let var = app
+        .filtered_vars
+        .iter()
+        .find(|v| v.scope == scope && v.name == var_name);
 
     if let Some(var) = var {
         let block = Block::default()
@@ -411,13 +409,11 @@ fn draw_view_dialog(f: &mut Frame, app: &App, var_name: &str) {
             Line::from(vec![
                 Span::styled("Source: ", Style::default().add_modifier(Modifier::BOLD)),
                 Span::styled(
-                    format!("{:?}", var.source),
-                    Style::default().fg(match &var.source {
-                        envx_core::EnvVarSource::System => Color::Yellow,
-                        envx_core::EnvVarSource::User => Color::Green,
-                        envx_core::EnvVarSource::Process => Color::Blue,
-                        envx_core::EnvVarSource::Shell => Color::Magenta,
-                        envx_core::EnvVarSource::Application(_) => Color::Cyan,
+                    format!("{:?}", var.scope),
+                    Style::default().fg(match var.scope {
+                        envx_core::EnvScope::System => Color::Yellow,
+                        envx_core::EnvScope::User => Color::Green,
+                        envx_core::EnvScope::Process => Color::Blue,
                     }),
                 ),
             ]),
@@ -470,8 +466,8 @@ fn draw_confirm_dialog(f: &mut Frame, action: &ConfirmAction) {
     let area = centered_rect(50, 20, f.area());
 
     let message = match action {
-        ConfirmAction::Delete(name) => format!("Delete variable '{name}'?"),
-        ConfirmAction::Save(name, _) => format!("Save variable '{name}'?"),
+        ConfirmAction::Delete(scope, name) => format!("Delete {scope} variable '{}'?", safe_name(name)),
+        ConfirmAction::Save(scope, name, _) => format!("Save {scope} variable '{}'?", safe_name(name)),
     };
 
     let block = Block::default()
@@ -497,6 +493,11 @@ fn draw_confirm_dialog(f: &mut Frame, action: &ConfirmAction) {
     f.render_widget(paragraph, inner_area);
 }
 
+fn safe_name(name: &str) -> String {
+    name.split_once('=')
+        .map_or_else(|| name.to_string(), |(prefix, _)| format!("{prefix}=<redacted>"))
+}
+
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
@@ -518,9 +519,9 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 }
 
 fn truncate_string(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+    if s.chars().count() <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len - 3])
+        format!("{}...", s.chars().take(max_len.saturating_sub(3)).collect::<String>())
     }
 }

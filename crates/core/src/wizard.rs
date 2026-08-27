@@ -432,7 +432,7 @@ impl SetupWizard {
                         .bright_green()
                         .bold()
                 );
-                std::thread::sleep(std::time::Duration::from_millis(1000));
+                std::thread::sleep(std::time::Duration::from_secs(1));
                 Ok(())
             }
             Some(false) => {

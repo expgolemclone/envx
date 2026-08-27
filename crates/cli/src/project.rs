@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::command;
+use crate::ScopeArg;
 use clap::{Args, Subcommand};
 use color_eyre::Result;
 use comfy_table::Table;
@@ -25,6 +25,9 @@ pub enum ProjectCommands {
     },
     /// Apply project configuration
     Apply {
+        /// Environment scope to mutate
+        #[arg(long, value_enum)]
+        scope: ScopeArg,
         /// Force apply even with validation errors
         #[arg(long)]
         force: bool,
@@ -104,9 +107,10 @@ pub fn handle_project(args: ProjectArgs) -> Result<()> {
             }
         }
 
-        ProjectCommands::Apply { force, file } => {
+        ProjectCommands::Apply { scope, force, file } => {
             let mut project = ProjectManager::new()?;
             let mut env_manager = EnvVarManager::new();
+            env_manager.load_all()?;
             let mut profile_manager = ProfileManager::new()?;
 
             let loaded = if let Some(custom_file) = file {
@@ -130,7 +134,7 @@ pub fn handle_project(args: ProjectArgs) -> Result<()> {
                 }
 
                 // Apply configuration
-                project.apply(&mut env_manager, &mut profile_manager)?;
+                project.apply(&mut env_manager, &mut profile_manager, scope.into())?;
                 println!("✅ Applied project configuration");
 
                 if !report.warnings.is_empty() {
@@ -146,7 +150,8 @@ pub fn handle_project(args: ProjectArgs) -> Result<()> {
 
         ProjectCommands::Check { file } => {
             let mut project = ProjectManager::new()?;
-            let env_manager = EnvVarManager::new();
+            let mut env_manager = EnvVarManager::new();
+            env_manager.load_all()?;
 
             let loaded = if let Some(custom_file) = file {
                 project.load_from_file(&custom_file)?;
@@ -222,6 +227,7 @@ pub fn handle_project(args: ProjectArgs) -> Result<()> {
         ProjectCommands::Run { script, file } => {
             let mut project = ProjectManager::new()?;
             let mut env_manager = EnvVarManager::new();
+            env_manager.load_all()?;
 
             let loaded = if let Some(custom_file) = file {
                 project.load_from_file(&custom_file)?;

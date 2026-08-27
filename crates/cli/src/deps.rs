@@ -1,8 +1,9 @@
+use crate::ScopeArg;
 use ahash::AHashMap as HashMap;
 use clap::{Args, Subcommand};
 use color_eyre::Result;
 use comfy_table::{Table, modifiers::UTF8_ROUND_CORNERS, presets::UTF8_FULL};
-use envx_core::EnvVarManager;
+use envx_core::{EnvScope, EnvVarManager};
 use regex::Regex;
 use std::collections::HashSet;
 use std::fs;
@@ -128,7 +129,12 @@ fn handle_deps_show(variable: Option<&str>, show_unused: bool, args: &DepsArgs) 
     // Load current environment variables
     let mut manager = EnvVarManager::new();
     manager.load_all()?;
-    let all_vars: HashSet<String> = manager.list().iter().map(|v| v.name.clone()).collect();
+    let all_vars: HashSet<String> = manager
+        .list(None)
+        .iter()
+        .filter(|variable| !variable.name.contains('='))
+        .map(|variable| variable.name.clone())
+        .collect();
 
     if show_unused {
         // Show unused variables
@@ -163,15 +169,11 @@ fn handle_deps_show(variable: Option<&str>, show_unused: bool, args: &DepsArgs) 
                     sorted_vars.sort();
 
                     for var_name in sorted_vars {
-                        if let Some(var) = manager.get(&var_name) {
+                        if let Some(var) = manager.get_any(&var_name).into_iter().next() {
                             table.add_row(vec![
                                 var.name.clone(),
-                                if var.value.len() > 50 {
-                                    format!("{}...", &var.value[..47])
-                                } else {
-                                    var.value.clone()
-                                },
-                                format!("{:?}", var.source),
+                                "[REDACTED]".to_string(),
+                                format!("{:?}", var.scope),
                             ]);
                         }
                     }
@@ -383,6 +385,10 @@ fn handle_deps_stats(by_usage: bool, args: &DepsArgs) -> Result<()> {
 
 #[derive(Args)]
 pub struct CleanupArgs {
+    /// Environment scope to clean
+    #[arg(long, value_enum)]
+    pub scope: ScopeArg,
+
     /// Force cleanup without confirmation
     #[arg(short, long)]
     pub force: bool,
@@ -428,7 +434,8 @@ pub fn handle_cleanup(args: &CleanupArgs) -> Result<()> {
     // Load current environment variables
     let mut manager = EnvVarManager::new();
     manager.load_all()?;
-    let all_vars: HashSet<String> = manager.list().iter().map(|v| v.name.clone()).collect();
+    let scope: EnvScope = args.scope.into();
+    let all_vars: HashSet<String> = manager.list(Some(scope)).iter().map(|v| v.name.clone()).collect();
 
     // Find unused variables
     let mut unused = tracker.find_unused(&all_vars);
@@ -436,9 +443,10 @@ pub fn handle_cleanup(args: &CleanupArgs) -> Result<()> {
     // Filter out variables that should be kept
     if !args.keep.is_empty() {
         unused.retain(|var| {
-            !args.keep.iter().any(|pattern| {
-                var.contains(pattern) || glob::Pattern::new(pattern).map(|p| p.matches(var)).unwrap_or(false)
-            })
+            !args
+                .keep
+                .iter()
+                .any(|pattern| var.contains(pattern) || glob::Pattern::new(pattern).is_ok_and(|p| p.matches(var)))
         });
     }
 
@@ -453,17 +461,8 @@ pub fn handle_cleanup(args: &CleanupArgs) -> Result<()> {
     sorted_unused.sort();
 
     for var in &sorted_unused {
-        if let Some(env_var) = manager.get(var) {
-            println!(
-                "   - {} = {} [{:?}]",
-                var,
-                if env_var.value.len() > 50 {
-                    format!("{}...", &env_var.value[..47])
-                } else {
-                    env_var.value.clone()
-                },
-                env_var.source
-            );
+        if let Some(env_var) = manager.get(scope, var) {
+            println!("   - {} = [REDACTED] [{:?}]", var, env_var.scope);
         }
     }
 
@@ -490,7 +489,7 @@ pub fn handle_cleanup(args: &CleanupArgs) -> Result<()> {
     let mut failed = 0;
 
     for var in sorted_unused {
-        match manager.delete(&var) {
+        match manager.delete(scope, &var) {
             Ok(()) => {
                 removed += 1;
                 println!("✅ Removed: {var}");

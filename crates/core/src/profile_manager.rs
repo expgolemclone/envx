@@ -1,5 +1,5 @@
-use crate::EnvVarManager;
 use crate::snapshot::Profile;
+use crate::{EnvScope, EnvVarManager};
 use ahash::AHashMap as HashMap;
 use color_eyre::Result;
 use color_eyre::eyre::eyre;
@@ -146,14 +146,14 @@ impl ProfileManager {
     /// - The specified profile is not found
     /// - A parent profile is not found during recursive application
     /// - Setting environment variables in the manager fails
-    pub fn apply(&self, name: &str, manager: &mut EnvVarManager) -> Result<()> {
+    pub fn apply(&self, name: &str, manager: &mut EnvVarManager, scope: EnvScope) -> Result<()> {
         let profile = self
             .get(name)
             .ok_or_else(|| color_eyre::eyre::eyre!("Profile '{}' not found", name))?;
 
         // Apply parent profile first if exists
         if let Some(parent) = &profile.parent {
-            self.apply(parent, manager)?;
+            self.apply(parent, manager, scope)?;
         }
 
         // Apply this profile's variables
@@ -161,7 +161,7 @@ impl ProfileManager {
             if var.enabled {
                 // Always set the variable, regardless of whether it exists
                 // This ensures profile switching actually updates values
-                manager.set(var_name, &var.value, true)?;
+                manager.set(scope, var_name, &var.value, None)?;
             }
         }
 
@@ -443,12 +443,15 @@ mod tests {
         profile.add_var("NODE_ENV".to_string(), "development".to_string(), false);
         profile.add_var("DEBUG".to_string(), "true".to_string(), false);
 
-        let result = manager.apply("dev", &mut env_manager);
+        let result = manager.apply("dev", &mut env_manager, EnvScope::Process);
         assert!(result.is_ok());
 
         // Verify variables were set
-        assert_eq!(env_manager.get("NODE_ENV").unwrap().value, "development");
-        assert_eq!(env_manager.get("DEBUG").unwrap().value, "true");
+        assert_eq!(
+            env_manager.get(EnvScope::Process, "NODE_ENV").unwrap().value,
+            "development"
+        );
+        assert_eq!(env_manager.get(EnvScope::Process, "DEBUG").unwrap().value, "true");
     }
 
     #[test]
@@ -468,10 +471,13 @@ mod tests {
         );
         profile.add_var("ENABLED_VAR".to_string(), "should_be_set".to_string(), false);
 
-        manager.apply("dev", &mut env_manager).unwrap();
+        manager.apply("dev", &mut env_manager, EnvScope::Process).unwrap();
 
-        assert!(env_manager.get("DISABLED_VAR").is_none());
-        assert_eq!(env_manager.get("ENABLED_VAR").unwrap().value, "should_be_set");
+        assert!(env_manager.get(EnvScope::Process, "DISABLED_VAR").is_none());
+        assert_eq!(
+            env_manager.get(EnvScope::Process, "ENABLED_VAR").unwrap().value,
+            "should_be_set"
+        );
     }
 
     #[test]
@@ -492,13 +498,22 @@ mod tests {
         profile.add_var("DEV_VAR".to_string(), "dev_value".to_string(), false);
         profile.add_var("OVERRIDE_ME".to_string(), "dev_override".to_string(), false);
 
-        manager.apply("dev", &mut env_manager).unwrap();
+        manager.apply("dev", &mut env_manager, EnvScope::Process).unwrap();
 
         // Should have variables from both profiles
-        assert_eq!(env_manager.get("BASE_VAR").unwrap().value, "base_value");
-        assert_eq!(env_manager.get("DEV_VAR").unwrap().value, "dev_value");
+        assert_eq!(
+            env_manager.get(EnvScope::Process, "BASE_VAR").unwrap().value,
+            "base_value"
+        );
+        assert_eq!(
+            env_manager.get(EnvScope::Process, "DEV_VAR").unwrap().value,
+            "dev_value"
+        );
         // Child should override parent
-        assert_eq!(env_manager.get("OVERRIDE_ME").unwrap().value, "dev_override");
+        assert_eq!(
+            env_manager.get(EnvScope::Process, "OVERRIDE_ME").unwrap().value,
+            "dev_override"
+        );
     }
 
     #[test]
@@ -506,7 +521,7 @@ mod tests {
         let (manager, _temp) = create_test_profile_manager();
         let mut env_manager = EnvVarManager::new();
 
-        let result = manager.apply("nonexistent", &mut env_manager);
+        let result = manager.apply("nonexistent", &mut env_manager, EnvScope::Process);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }

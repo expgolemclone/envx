@@ -1,3 +1,4 @@
+use crate::ScopeArg;
 use clap::Args;
 use color_eyre::Result;
 use comfy_table::{Table, presets::UTF8_FULL};
@@ -5,6 +6,10 @@ use envx_core::{EnvVarManager, env::split_wildcard_pattern};
 
 #[derive(Args)]
 pub struct ReplaceArgs {
+    /// Environment scope to mutate
+    #[arg(long, value_enum)]
+    pub scope: ScopeArg,
+
     /// Variable name or pattern (supports wildcards with *)
     pub pattern: String,
 
@@ -18,6 +23,10 @@ pub struct ReplaceArgs {
 
 #[derive(Args)]
 pub struct FindReplaceArgs {
+    /// Environment scope to mutate
+    #[arg(long, value_enum)]
+    pub scope: ScopeArg,
+
     /// Text to search for in values
     pub search: String,
 
@@ -45,10 +54,11 @@ pub struct FindReplaceArgs {
 pub fn handle_replace(args: &ReplaceArgs) -> Result<()> {
     let mut manager = EnvVarManager::new();
     manager.load_all()?;
+    let scope = args.scope.into();
 
     if args.dry_run {
         // Show what would be replaced
-        let preview = preview_replace(&manager, &args.pattern)?;
+        let preview = preview_replace(&manager, scope, &args.pattern)?;
 
         if preview.is_empty() {
             println!("No variables match the pattern '{}'", args.pattern);
@@ -59,15 +69,15 @@ pub fn handle_replace(args: &ReplaceArgs) -> Result<()> {
             table.load_preset(UTF8_FULL);
             table.set_header(vec!["Variable", "Current Value", "New Value"]);
 
-            for (name, current) in preview {
-                table.add_row(vec![name, current, args.value.clone()]);
+            for name in preview {
+                table.add_row(vec![name, "[REDACTED]".to_string(), "[REDACTED]".to_string()]);
             }
 
             println!("{table}");
             println!("\nUse without --dry-run to apply changes");
         }
     } else {
-        let replaced = manager.replace(&args.pattern, &args.value)?;
+        let replaced = manager.replace(scope, &args.pattern, &args.value)?;
 
         if replaced.is_empty() {
             println!("No variables match the pattern '{}'", args.pattern);
@@ -78,19 +88,8 @@ pub fn handle_replace(args: &ReplaceArgs) -> Result<()> {
             table.load_preset(UTF8_FULL);
             table.set_header(vec!["Variable", "Old Value", "New Value"]);
 
-            for (name, old, new) in &replaced {
-                // Truncate long values for display
-                let display_old = if old.len() > 50 {
-                    format!("{}...", &old[..47])
-                } else {
-                    old.clone()
-                };
-                let display_new = if new.len() > 50 {
-                    format!("{}...", &new[..47])
-                } else {
-                    new.clone()
-                };
-                table.add_row(vec![name.clone(), display_old, display_new]);
+            for (name, _, _) in &replaced {
+                table.add_row(vec![name.clone(), "[REDACTED]".to_string(), "[REDACTED]".to_string()]);
             }
 
             println!("{table}");
@@ -103,22 +102,22 @@ pub fn handle_replace(args: &ReplaceArgs) -> Result<()> {
     Ok(())
 }
 
-fn preview_replace(manager: &EnvVarManager, pattern: &str) -> Result<Vec<(String, String)>> {
+fn preview_replace(manager: &EnvVarManager, scope: envx_core::EnvScope, pattern: &str) -> Result<Vec<String>> {
     let mut preview = Vec::new();
 
     if pattern.contains('*') {
         let (prefix, suffix) = split_wildcard_pattern(pattern)?;
 
-        for var in manager.list() {
+        for var in manager.list(Some(scope)) {
             if var.name.starts_with(&prefix)
                 && var.name.ends_with(&suffix)
                 && var.name.len() >= prefix.len() + suffix.len()
             {
-                preview.push((var.name.clone(), var.value.clone()));
+                preview.push(var.name.clone());
             }
         }
-    } else if let Some(var) = manager.get(pattern) {
-        preview.push((var.name.clone(), var.value.clone()));
+    } else if let Some(var) = manager.get(scope, pattern) {
+        preview.push(var.name.clone());
     }
 
     Ok(preview)
@@ -137,10 +136,17 @@ fn preview_replace(manager: &EnvVarManager, pattern: &str) -> Result<Vec<(String
 pub fn handle_find_replace(args: &FindReplaceArgs) -> Result<()> {
     let mut manager = EnvVarManager::new();
     manager.load_all()?;
+    let scope = args.scope.into();
 
     if args.dry_run {
         // Show preview
-        let preview = preview_find_replace(&manager, &args.search, &args.replacement, args.pattern.as_deref())?;
+        let preview = preview_find_replace(
+            &manager,
+            scope,
+            &args.search,
+            &args.replacement,
+            args.pattern.as_deref(),
+        )?;
 
         if preview.is_empty() {
             println!("No variables contain '{}'", args.search);
@@ -151,15 +157,15 @@ pub fn handle_find_replace(args: &FindReplaceArgs) -> Result<()> {
             table.load_preset(UTF8_FULL);
             table.set_header(vec!["Variable", "Current Value", "New Value"]);
 
-            for (name, old, new) in preview {
-                table.add_row(vec![name, old, new]);
+            for name in preview {
+                table.add_row(vec![name, "[REDACTED]".to_string(), "[REDACTED]".to_string()]);
             }
 
             println!("{table}");
             println!("\nUse without --dry-run to apply changes");
         }
     } else {
-        let replaced = manager.find_replace(&args.search, &args.replacement, args.pattern.as_deref())?;
+        let replaced = manager.find_replace(scope, &args.search, &args.replacement, args.pattern.as_deref())?;
 
         if replaced.is_empty() {
             println!("No variables contain '{}'", args.search);
@@ -170,19 +176,8 @@ pub fn handle_find_replace(args: &FindReplaceArgs) -> Result<()> {
             table.load_preset(UTF8_FULL);
             table.set_header(vec!["Variable", "Old Value", "New Value"]);
 
-            for (name, old, new) in &replaced {
-                // Truncate long values
-                let display_old = if old.len() > 50 {
-                    format!("{}...", &old[..47])
-                } else {
-                    old.clone()
-                };
-                let display_new = if new.len() > 50 {
-                    format!("{}...", &new[..47])
-                } else {
-                    new.clone()
-                };
-                table.add_row(vec![name.clone(), display_old, display_new]);
+            for (name, _, _) in &replaced {
+                table.add_row(vec![name.clone(), "[REDACTED]".to_string(), "[REDACTED]".to_string()]);
             }
 
             println!("{table}");
@@ -197,13 +192,14 @@ pub fn handle_find_replace(args: &FindReplaceArgs) -> Result<()> {
 
 fn preview_find_replace(
     manager: &EnvVarManager,
+    scope: envx_core::EnvScope,
     search: &str,
     replacement: &str,
     pattern: Option<&str>,
-) -> Result<Vec<(String, String, String)>> {
+) -> Result<Vec<String>> {
     let mut preview = Vec::new();
 
-    for var in manager.list() {
+    for var in manager.list(Some(scope)) {
         // Check if variable matches pattern (if specified)
         let matches_pattern = if let Some(pat) = pattern {
             if pat.contains('*') {
@@ -219,8 +215,8 @@ fn preview_find_replace(
         };
 
         if matches_pattern && var.value.contains(search) {
-            let new_value = var.value.replace(search, replacement);
-            preview.push((var.name.clone(), var.value.clone(), new_value));
+            let _new_value = var.value.replace(search, replacement);
+            preview.push(var.name.clone());
         }
     }
 

@@ -1,5 +1,5 @@
 use crate::project_config::ProjectConfig;
-use crate::{EnvVarManager, ProfileManager, ValidationRules};
+use crate::{EnvScope, EnvVarManager, ProfileManager, ValidationRules};
 use ahash::AHashMap as HashMap;
 use color_eyre::Result;
 use color_eyre::eyre::eyre;
@@ -125,7 +125,12 @@ impl ProjectManager {
     /// - Profile application fails
     /// - Loading environment files fails
     /// - Setting environment variables fails
-    pub fn apply(&self, manager: &mut EnvVarManager, profile_manager: &mut ProfileManager) -> Result<()> {
+    pub fn apply(
+        &self,
+        manager: &mut EnvVarManager,
+        profile_manager: &mut ProfileManager,
+        scope: EnvScope,
+    ) -> Result<()> {
         let config = self
             .config
             .as_ref()
@@ -133,21 +138,21 @@ impl ProjectManager {
 
         // Apply profile if specified
         if let Some(profile_name) = &config.profile {
-            profile_manager.apply(profile_name, manager)?;
+            profile_manager.apply(profile_name, manager, scope)?;
         }
 
         // Load auto-load files
         for file in &config.auto_load {
             let file_path = self.current_dir.join(file);
             if file_path.exists() {
-                Self::load_env_file(&file_path, manager)?;
+                Self::load_env_file(&file_path, manager, scope)?;
             }
         }
 
         // Apply defaults (only if variable not already set)
         for (name, value) in &config.defaults {
-            if manager.get(name).is_none() {
-                manager.set(name, value, true)?;
+            if manager.get_any(name).is_empty() {
+                manager.set(scope, name, value, None)?;
             }
         }
 
@@ -189,7 +194,7 @@ impl ProjectManager {
 
         // Check required variables
         for required in &config.required {
-            match manager.get(&required.name) {
+            match manager.get_any(&required.name).into_iter().next() {
                 Some(var) => {
                     // Validate pattern if specified
                     if let Some(pattern) = &required.pattern {
@@ -216,7 +221,7 @@ impl ProjectManager {
 
         // Check validation rules
         if config.validation.strict_names {
-            for var in manager.list() {
+            for var in manager.list(None) {
                 if !is_valid_var_name(&var.name) {
                     report.warnings.push(ValidationWarning {
                         var_name: var.name.clone(),
@@ -252,7 +257,7 @@ impl ProjectManager {
 
         // Apply script-specific environment variables
         for (name, value) in &script.env {
-            manager.set(name, value, false)?;
+            manager.set(EnvScope::Process, name, value, None)?;
         }
 
         // Execute the script
@@ -269,7 +274,7 @@ impl ProjectManager {
         Ok(())
     }
 
-    fn load_env_file(path: &Path, manager: &mut EnvVarManager) -> Result<()> {
+    fn load_env_file(path: &Path, manager: &mut EnvVarManager, scope: EnvScope) -> Result<()> {
         let content = fs::read_to_string(path)?;
 
         for line in content.lines() {
@@ -281,7 +286,7 @@ impl ProjectManager {
             if let Some((key, value)) = line.split_once('=') {
                 let key = key.trim();
                 let value = value.trim().trim_matches('"').trim_matches('\'');
-                manager.set(key, value, true)?;
+                manager.set(scope, key, value, None)?;
             }
         }
 
@@ -352,7 +357,9 @@ mod tests {
 
     fn create_test_env_manager() -> EnvVarManager {
         let mut manager = EnvVarManager::new();
-        manager.set("EXISTING_VAR", "existing_value", false).unwrap();
+        manager
+            .set(EnvScope::Process, "EXISTING_VAR", "existing_value", None)
+            .unwrap();
         manager
     }
 
@@ -523,11 +530,17 @@ mod tests {
         config.auto_load = vec![".env".to_string()];
         manager.config = Some(config);
 
-        let result = manager.apply(&mut env_manager, &mut profile_manager);
+        let result = manager.apply(&mut env_manager, &mut profile_manager, EnvScope::Process);
         assert!(result.is_ok());
 
-        assert_eq!(env_manager.get("TEST_VAR").unwrap().value, "test_value");
-        assert_eq!(env_manager.get("ANOTHER_VAR").unwrap().value, "another_value");
+        assert_eq!(
+            env_manager.get(EnvScope::Process, "TEST_VAR").unwrap().value,
+            "test_value"
+        );
+        assert_eq!(
+            env_manager.get(EnvScope::Process, "ANOTHER_VAR").unwrap().value,
+            "another_value"
+        );
     }
 
     #[test]
@@ -538,11 +551,14 @@ mod tests {
 
         manager.config = Some(create_test_config());
 
-        let result = manager.apply(&mut env_manager, &mut profile_manager);
+        let result = manager.apply(&mut env_manager, &mut profile_manager, EnvScope::Process);
         assert!(result.is_ok());
 
-        assert_eq!(env_manager.get("NODE_ENV").unwrap().value, "development");
-        assert_eq!(env_manager.get("PORT").unwrap().value, "3000");
+        assert_eq!(
+            env_manager.get(EnvScope::Process, "NODE_ENV").unwrap().value,
+            "development"
+        );
+        assert_eq!(env_manager.get(EnvScope::Process, "PORT").unwrap().value, "3000");
     }
 
     #[test]
@@ -552,14 +568,21 @@ mod tests {
         let mut profile_manager = create_test_profile_manager();
 
         // Set a variable that's also in defaults
-        env_manager.set("NODE_ENV", "production", false).unwrap();
+        env_manager
+            .set(EnvScope::Process, "NODE_ENV", "production", None)
+            .unwrap();
 
         manager.config = Some(create_test_config());
 
-        manager.apply(&mut env_manager, &mut profile_manager).unwrap();
+        manager
+            .apply(&mut env_manager, &mut profile_manager, EnvScope::Process)
+            .unwrap();
 
         // Should not override existing value
-        assert_eq!(env_manager.get("NODE_ENV").unwrap().value, "production");
+        assert_eq!(
+            env_manager.get(EnvScope::Process, "NODE_ENV").unwrap().value,
+            "production"
+        );
     }
 
     #[test]
@@ -568,7 +591,7 @@ mod tests {
         let mut env_manager = create_test_env_manager();
         let mut profile_manager = create_test_profile_manager();
 
-        let result = manager.apply(&mut env_manager, &mut profile_manager);
+        let result = manager.apply(&mut env_manager, &mut profile_manager, EnvScope::Process);
         assert!(result.is_err());
         assert!(
             result
@@ -585,9 +608,11 @@ mod tests {
 
         // Set required variables
         env_manager
-            .set("DATABASE_URL", "postgresql://localhost/mydb", false)
+            .set(EnvScope::Process, "DATABASE_URL", "postgresql://localhost/mydb", None)
             .unwrap();
-        env_manager.set("API_KEY", "secret-key", false).unwrap();
+        env_manager
+            .set(EnvScope::Process, "API_KEY", "secret-key", None)
+            .unwrap();
 
         manager.config = Some(create_test_config());
 
@@ -620,8 +645,12 @@ mod tests {
         let mut env_manager = create_test_env_manager();
 
         // Set with invalid pattern
-        env_manager.set("DATABASE_URL", "invalid-url", false).unwrap();
-        env_manager.set("API_KEY", "valid-key", false).unwrap();
+        env_manager
+            .set(EnvScope::Process, "DATABASE_URL", "invalid-url", None)
+            .unwrap();
+        env_manager
+            .set(EnvScope::Process, "API_KEY", "valid-key", None)
+            .unwrap();
 
         manager.config = Some(create_test_config());
 
@@ -639,11 +668,12 @@ mod tests {
 
         // Set variable with invalid name
         env_manager.vars.insert(
-            "invalid-name".to_string(),
+            crate::EnvKey::new(EnvScope::User, "invalid-name"),
             crate::EnvVar {
                 name: "invalid-name".to_string(),
                 value: "value".to_string(),
-                source: crate::EnvVarSource::User,
+                scope: crate::EnvScope::User,
+                kind: crate::EnvValueKind::String,
                 modified: chrono::Utc::now(),
                 original_value: None,
             },
@@ -669,7 +699,7 @@ mod tests {
         assert!(result.is_ok());
 
         // Verify script environment was applied
-        assert_eq!(env_manager.get("NODE_ENV").unwrap().value, "test");
+        assert_eq!(env_manager.get(EnvScope::Process, "NODE_ENV").unwrap().value, "test");
     }
 
     #[test]
@@ -722,13 +752,25 @@ VAR_WITH_SPACES = spaced value
 "#;
         fs::write(&env_path, content).unwrap();
 
-        ProjectManager::load_env_file(&env_path, &mut env_manager).unwrap();
+        ProjectManager::load_env_file(&env_path, &mut env_manager, EnvScope::Process).unwrap();
 
-        assert_eq!(env_manager.get("VAR1").unwrap().value, "value1");
-        assert_eq!(env_manager.get("VAR2").unwrap().value, "quoted value");
-        assert_eq!(env_manager.get("VAR3").unwrap().value, "single quoted");
-        assert_eq!(env_manager.get("EMPTY_LINE_ABOVE").unwrap().value, "yes");
-        assert_eq!(env_manager.get("VAR_WITH_SPACES").unwrap().value, "spaced value");
+        assert_eq!(env_manager.get(EnvScope::Process, "VAR1").unwrap().value, "value1");
+        assert_eq!(
+            env_manager.get(EnvScope::Process, "VAR2").unwrap().value,
+            "quoted value"
+        );
+        assert_eq!(
+            env_manager.get(EnvScope::Process, "VAR3").unwrap().value,
+            "single quoted"
+        );
+        assert_eq!(
+            env_manager.get(EnvScope::Process, "EMPTY_LINE_ABOVE").unwrap().value,
+            "yes"
+        );
+        assert_eq!(
+            env_manager.get(EnvScope::Process, "VAR_WITH_SPACES").unwrap().value,
+            "spaced value"
+        );
     }
 
     #[test]
@@ -747,22 +789,31 @@ SPECIAL_CHARS=!@#$%^&*()
 ";
         fs::write(&env_path, content).unwrap();
 
-        ProjectManager::load_env_file(&env_path, &mut env_manager).unwrap();
+        ProjectManager::load_env_file(&env_path, &mut env_manager, EnvScope::Process).unwrap();
 
-        assert_eq!(env_manager.get("EMPTY_VALUE").unwrap().value, "");
-        assert_eq!(env_manager.get("EQUALS_IN_VALUE").unwrap().value, "key=value=more");
+        assert_eq!(env_manager.get(EnvScope::Process, "EMPTY_VALUE").unwrap().value, "");
         assert_eq!(
-            env_manager.get("URL").unwrap().value,
+            env_manager.get(EnvScope::Process, "EQUALS_IN_VALUE").unwrap().value,
+            "key=value=more"
+        );
+        assert_eq!(
+            env_manager.get(EnvScope::Process, "URL").unwrap().value,
             "https://example.com/path?query=value"
         );
-        assert_eq!(env_manager.get("MULTILINE_ATTEMPT").unwrap().value, "line1\\nline2");
-        assert_eq!(env_manager.get("SPECIAL_CHARS").unwrap().value, "!@#$%^&*()");
+        assert_eq!(
+            env_manager.get(EnvScope::Process, "MULTILINE_ATTEMPT").unwrap().value,
+            "line1\\nline2"
+        );
+        assert_eq!(
+            env_manager.get(EnvScope::Process, "SPECIAL_CHARS").unwrap().value,
+            "!@#$%^&*()"
+        );
     }
 
     #[test]
     fn test_load_env_file_not_found() {
         let mut env_manager = create_test_env_manager();
-        let result = ProjectManager::load_env_file(Path::new("/nonexistent/.env"), &mut env_manager);
+        let result = ProjectManager::load_env_file(Path::new("/nonexistent/.env"), &mut env_manager, EnvScope::Process);
         assert!(result.is_err());
     }
 

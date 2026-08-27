@@ -32,6 +32,7 @@ ahash = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 winreg = { workspace = true }
+windows-sys = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true }

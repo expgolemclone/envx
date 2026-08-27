@@ -1,7 +1,8 @@
+use crate::ScopeArg;
 use clap::{Args, Subcommand};
 use color_eyre::Result;
 use comfy_table::Table;
-use envx_core::{EnvVarManager, ProfileManager};
+use envx_core::{EnvScope, EnvVarManager, ProfileManager};
 
 #[derive(Args)]
 pub struct ProfileArgs {
@@ -25,6 +26,9 @@ pub enum ProfileCommands {
     Show {
         /// Profile name (shows active if not specified)
         name: Option<String>,
+        /// Reveal variable values
+        #[arg(long)]
+        reveal: bool,
     },
     /// Switch to a profile
     Switch {
@@ -33,6 +37,9 @@ pub enum ProfileCommands {
         /// Apply immediately
         #[arg(short, long)]
         apply: bool,
+        /// Environment scope used when applying
+        #[arg(long, value_enum)]
+        scope: ScopeArg,
     },
     /// Add a variable to a profile
     Add {
@@ -84,6 +91,9 @@ pub enum ProfileCommands {
     Apply {
         /// Profile name
         name: String,
+        /// Environment scope to mutate
+        #[arg(long, value_enum)]
+        scope: ScopeArg,
     },
 }
 
@@ -111,11 +121,11 @@ pub fn handle_profile(args: ProfileArgs) -> Result<()> {
         ProfileCommands::List => {
             handle_profile_list(&profile_manager);
         }
-        ProfileCommands::Show { name } => {
-            handle_profile_show(&profile_manager, name)?;
+        ProfileCommands::Show { name, reveal } => {
+            handle_profile_show(&profile_manager, name, reveal)?;
         }
-        ProfileCommands::Switch { name, apply } => {
-            handle_profile_switch(&mut profile_manager, &mut env_manager, &name, apply)?;
+        ProfileCommands::Switch { name, apply, scope } => {
+            handle_profile_switch(&mut profile_manager, &mut env_manager, &name, apply, scope.into())?;
         }
         ProfileCommands::Add {
             profile,
@@ -137,8 +147,8 @@ pub fn handle_profile(args: ProfileArgs) -> Result<()> {
         ProfileCommands::Import { file, name, overwrite } => {
             handle_profile_import(&mut profile_manager, &file, name, overwrite)?;
         }
-        ProfileCommands::Apply { name } => {
-            handle_profile_apply(&mut profile_manager, &mut env_manager, &name)?;
+        ProfileCommands::Apply { name, scope } => {
+            handle_profile_apply(&mut profile_manager, &mut env_manager, &name, scope.into())?;
         }
     }
 
@@ -180,7 +190,7 @@ fn handle_profile_list(profile_manager: &ProfileManager) {
     println!("{table}");
 }
 
-fn handle_profile_show(profile_manager: &ProfileManager, name: Option<String>) -> Result<()> {
+fn handle_profile_show(profile_manager: &ProfileManager, name: Option<String>, reveal: bool) -> Result<()> {
     let profile = if let Some(name) = name {
         profile_manager
             .get(&name)
@@ -203,7 +213,8 @@ fn handle_profile_show(profile_manager: &ProfileManager, name: Option<String>) -
     for (name, var) in &profile.variables {
         let status = if var.enabled { "✓" } else { "✗" };
         let override_flag = if var.override_system { " [override]" } else { "" };
-        println!("  {} {} = {}{}", status, name, var.value, override_flag);
+        let value = if reveal { var.value.as_str() } else { "[REDACTED]" };
+        println!("  {status} {name} = {value}{override_flag}");
     }
     Ok(())
 }
@@ -213,12 +224,13 @@ fn handle_profile_switch(
     env_manager: &mut EnvVarManager,
     name: &str,
     apply: bool,
+    scope: EnvScope,
 ) -> Result<()> {
     profile_manager.switch(name)?;
     println!("✅ Switched to profile: {name}");
 
     if apply {
-        profile_manager.apply(name, env_manager)?;
+        profile_manager.apply(name, env_manager, scope)?;
         println!("✅ Applied profile variables");
     }
     Ok(())
@@ -303,8 +315,9 @@ fn handle_profile_apply(
     profile_manager: &mut ProfileManager,
     env_manager: &mut EnvVarManager,
     name: &str,
+    scope: EnvScope,
 ) -> Result<()> {
-    profile_manager.apply(name, env_manager)?;
+    profile_manager.apply(name, env_manager, scope)?;
     println!("✅ Applied profile: {name}");
     Ok(())
 }

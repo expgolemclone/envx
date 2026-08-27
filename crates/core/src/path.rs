@@ -1,6 +1,6 @@
 use color_eyre::Result;
+use color_eyre::eyre::WrapErr;
 use std::collections::HashSet;
-use std::path::Path;
 
 /// Manages PATH-like environment variables
 pub struct PathManager {
@@ -36,16 +36,34 @@ impl PathManager {
         self.entries.is_empty()
     }
 
-    #[must_use]
-    pub fn contains(&self, path: &str) -> bool {
-        let normalized = Self::normalize_path(path);
-        self.entries.iter().any(|e| Self::normalize_path(e) == normalized)
+    /// Tests whether an equivalent path is present after environment expansion and normalization.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Windows cannot expand an environment expression.
+    pub fn contains(&self, path: &str) -> Result<bool> {
+        let normalized = Self::normalize_path(path)?;
+        for entry in &self.entries {
+            if Self::normalize_path(entry)? == normalized {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
-    #[must_use]
-    pub fn find_index(&self, path: &str) -> Option<usize> {
-        let normalized = Self::normalize_path(path);
-        self.entries.iter().position(|e| Self::normalize_path(e) == normalized)
+    /// Finds an equivalent path after environment expansion and normalization.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Windows cannot expand an environment expression.
+    pub fn find_index(&self, path: &str) -> Result<Option<usize>> {
+        let normalized = Self::normalize_path(path)?;
+        for (index, entry) in self.entries.iter().enumerate() {
+            if Self::normalize_path(entry)? == normalized {
+                return Ok(Some(index));
+            }
+        }
+        Ok(None)
     }
 
     pub fn add_first(&mut self, path: String) {
@@ -56,21 +74,34 @@ impl PathManager {
         self.entries.push(path);
     }
 
-    pub fn remove_first(&mut self, pattern: &str) -> usize {
-        if let Some(idx) = self.find_index(pattern) {
+    /// Removes the first equivalent path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Windows cannot expand an environment expression.
+    pub fn remove_first(&mut self, pattern: &str) -> Result<usize> {
+        if let Some(idx) = self.find_index(pattern)? {
             self.entries.remove(idx);
-            1
+            Ok(1)
         } else {
-            0
+            Ok(0)
         }
     }
 
-    pub fn remove_all(&mut self, pattern: &str) -> usize {
-        let normalized = Self::normalize_path(pattern);
+    /// Removes every equivalent path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Windows cannot expand an environment expression.
+    pub fn remove_all(&mut self, pattern: &str) -> Result<usize> {
+        let normalized = Self::normalize_path(pattern)?;
         let original_len = self.entries.len();
 
-        // Pre-normalize all entries to avoid borrowing self in the closure
-        let normalized_entries: Vec<String> = self.entries.iter().map(|e| Self::normalize_path(e)).collect();
+        let normalized_entries: Vec<String> = self
+            .entries
+            .iter()
+            .map(|entry| Self::normalize_path(entry))
+            .collect::<Result<_>>()?;
 
         // Keep only entries that don't match the normalized pattern
         let mut new_entries = Vec::new();
@@ -81,7 +112,7 @@ impl PathManager {
         }
         self.entries = new_entries;
 
-        original_len - self.entries.len()
+        Ok(original_len - self.entries.len())
     }
 
     /// Moves an entry from one position to another in the PATH entries.
@@ -105,37 +136,63 @@ impl PathManager {
         Ok(())
     }
 
-    #[must_use]
-    pub fn get_invalid(&self) -> Vec<String> {
-        self.entries
-            .iter()
-            .filter(|e| !Path::new(e).exists())
-            .cloned()
-            .collect()
+    /// Returns entries whose expanded path does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Windows cannot expand an environment expression.
+    pub fn get_invalid(&self) -> Result<Vec<String>> {
+        let mut invalid = Vec::new();
+        for entry in &self.entries {
+            if !Self::resolved_path(entry)?.exists() {
+                invalid.push(entry.clone());
+            }
+        }
+        Ok(invalid)
     }
 
-    pub fn remove_invalid(&mut self) -> usize {
+    /// Removes entries whose expanded path does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Windows cannot expand an environment expression.
+    pub fn remove_invalid(&mut self) -> Result<usize> {
         let original_len = self.entries.len();
-        self.entries.retain(|e| Path::new(e).exists());
-        original_len - self.entries.len()
+        let mut valid = Vec::new();
+        for entry in &self.entries {
+            if Self::resolved_path(entry)?.exists() {
+                valid.push(entry.clone());
+            }
+        }
+        self.entries = valid;
+        Ok(original_len - self.entries.len())
     }
 
-    #[must_use]
-    pub fn get_duplicates(&self) -> Vec<String> {
+    /// Returns repeated entries after environment expansion and normalization.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Windows cannot expand an environment expression.
+    pub fn get_duplicates(&self) -> Result<Vec<String>> {
         let mut seen = HashSet::new();
         let mut duplicates = Vec::new();
 
         for entry in &self.entries {
-            let normalized = Self::normalize_path(entry);
+            let normalized = Self::normalize_path(entry)?;
             if !seen.insert(normalized.clone()) {
                 duplicates.push(entry.clone());
             }
         }
 
-        duplicates
+        Ok(duplicates)
     }
 
-    pub fn deduplicate(&mut self, keep_first: bool) -> usize {
+    /// Removes repeated entries while preserving either the first or last occurrence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Windows cannot expand an environment expression.
+    pub fn deduplicate(&mut self, keep_first: bool) -> Result<usize> {
         let mut seen = HashSet::new();
         let original_len = self.entries.len();
 
@@ -143,7 +200,7 @@ impl PathManager {
             // Keep first occurrence
             let mut deduped = Vec::new();
             for entry in &self.entries {
-                let normalized = Self::normalize_path(entry);
+                let normalized = Self::normalize_path(entry)?;
                 if seen.insert(normalized) {
                     deduped.push(entry.clone());
                 }
@@ -153,7 +210,7 @@ impl PathManager {
             // Keep last occurrence
             let mut deduped = Vec::new();
             for entry in self.entries.iter().rev() {
-                let normalized = Self::normalize_path(entry);
+                let normalized = Self::normalize_path(entry)?;
                 if seen.insert(normalized) {
                     deduped.push(entry.clone());
                 }
@@ -162,7 +219,7 @@ impl PathManager {
             self.entries = deduped;
         }
 
-        original_len - self.entries.len()
+        Ok(original_len - self.entries.len())
     }
 
     #[must_use]
@@ -171,9 +228,24 @@ impl PathManager {
         self.entries.join(&self.separator.to_string())
     }
 
-    /// Normalize path for comparison (handle case sensitivity and trailing slashes)
-    fn normalize_path(path: &str) -> String {
-        let mut normalized = path.to_string();
+    /// Resolves a path for comparison or existence checks without changing its stored representation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Windows cannot expand an environment expression.
+    pub fn resolved_path(path: &str) -> Result<std::path::PathBuf> {
+        #[cfg(windows)]
+        {
+            Ok(std::path::PathBuf::from(expand_windows_environment(path)?))
+        }
+        #[cfg(not(windows))]
+        {
+            Ok(std::path::PathBuf::from(path))
+        }
+    }
+
+    fn normalize_path(path: &str) -> Result<String> {
+        let mut normalized = Self::resolved_path(path)?.to_string_lossy().into_owned();
 
         // Remove trailing slashes
         while normalized.ends_with('/') || normalized.ends_with('\\') {
@@ -198,8 +270,26 @@ impl PathManager {
             normalized = normalized.replace('\\', "/");
         }
 
-        normalized
+        Ok(normalized)
     }
+}
+
+#[cfg(windows)]
+fn expand_windows_environment(value: &str) -> Result<String> {
+    use windows_sys::Win32::System::Environment::ExpandEnvironmentStringsW;
+
+    let input: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
+    let required = unsafe { ExpandEnvironmentStringsW(input.as_ptr(), std::ptr::null_mut(), 0) };
+    if required == 0 {
+        return Err(std::io::Error::last_os_error()).wrap_err("Failed to size expanded PATH entry");
+    }
+    let mut output = vec![0u16; required as usize];
+    let written = unsafe { ExpandEnvironmentStringsW(input.as_ptr(), output.as_mut_ptr(), required) };
+    if written == 0 || written > required {
+        return Err(std::io::Error::last_os_error()).wrap_err("Failed to expand PATH entry");
+    }
+    output.truncate(written.saturating_sub(1) as usize);
+    Ok(String::from_utf16_lossy(&output))
 }
 
 // ...existing code...
@@ -271,14 +361,14 @@ mod tests {
     fn test_contains() {
         let mgr = create_test_manager();
         if cfg!(windows) {
-            assert!(mgr.contains("C:\\Windows"));
-            assert!(mgr.contains("c:\\windows")); // Case insensitive on Windows
-            assert!(mgr.contains("C:/Windows")); // Forward slash normalization
-            assert!(!mgr.contains("C:\\NonExistent"));
+            assert!(mgr.contains("C:\\Windows").unwrap());
+            assert!(mgr.contains("c:\\windows").unwrap()); // Case insensitive on Windows
+            assert!(mgr.contains("C:/Windows").unwrap()); // Forward slash normalization
+            assert!(!mgr.contains("C:\\NonExistent").unwrap());
         } else {
-            assert!(mgr.contains("/usr/bin"));
-            assert!(mgr.contains("/usr/bin/")); // Trailing slash normalization
-            assert!(!mgr.contains("/nonexistent"));
+            assert!(mgr.contains("/usr/bin").unwrap());
+            assert!(mgr.contains("/usr/bin/").unwrap()); // Trailing slash normalization
+            assert!(!mgr.contains("/nonexistent").unwrap());
         }
     }
 
@@ -286,10 +376,10 @@ mod tests {
     fn test_contains_with_trailing_slashes() {
         let mgr = create_test_manager();
         if cfg!(windows) {
-            assert!(mgr.contains("C:\\Windows\\"));
-            assert!(mgr.contains("C:\\Windows/"));
+            assert!(mgr.contains("C:\\Windows\\").unwrap());
+            assert!(mgr.contains("C:\\Windows/").unwrap());
         } else {
-            assert!(mgr.contains("/usr/bin/"));
+            assert!(mgr.contains("/usr/bin/").unwrap());
         }
     }
 
@@ -297,14 +387,14 @@ mod tests {
     fn test_find_index() {
         let mgr = create_test_manager();
         if cfg!(windows) {
-            assert_eq!(mgr.find_index("C:\\Windows"), Some(0));
-            assert_eq!(mgr.find_index("C:\\Program Files"), Some(1));
-            assert_eq!(mgr.find_index("D:\\Tools"), Some(4));
-            assert_eq!(mgr.find_index("C:\\NonExistent"), None);
+            assert_eq!(mgr.find_index("C:\\Windows").unwrap(), Some(0));
+            assert_eq!(mgr.find_index("C:\\Program Files").unwrap(), Some(1));
+            assert_eq!(mgr.find_index("D:\\Tools").unwrap(), Some(4));
+            assert_eq!(mgr.find_index("C:\\NonExistent").unwrap(), None);
         } else {
-            assert_eq!(mgr.find_index("/usr/bin"), Some(0));
-            assert_eq!(mgr.find_index("/opt/tools"), Some(4));
-            assert_eq!(mgr.find_index("/nonexistent"), None);
+            assert_eq!(mgr.find_index("/usr/bin").unwrap(), Some(0));
+            assert_eq!(mgr.find_index("/opt/tools").unwrap(), Some(4));
+            assert_eq!(mgr.find_index("/nonexistent").unwrap(), None);
         }
     }
 
@@ -344,21 +434,21 @@ mod tests {
         let original_len = mgr.len();
 
         if cfg!(windows) {
-            let removed = mgr.remove_first("C:\\Windows");
+            let removed = mgr.remove_first("C:\\Windows").unwrap();
             assert_eq!(removed, 1);
             assert_eq!(mgr.len(), original_len - 1);
             // Should only remove first occurrence
-            assert!(mgr.contains("C:\\Windows")); // Second occurrence still there
+            assert!(mgr.contains("C:\\Windows").unwrap()); // Second occurrence still there
 
-            let removed = mgr.remove_first("C:\\NonExistent");
+            let removed = mgr.remove_first("C:\\NonExistent").unwrap();
             assert_eq!(removed, 0);
             assert_eq!(mgr.len(), original_len - 1);
         } else {
-            let removed = mgr.remove_first("/usr/bin");
+            let removed = mgr.remove_first("/usr/bin").unwrap();
             assert_eq!(removed, 1);
             assert_eq!(mgr.len(), original_len - 1);
             // Should only remove first occurrence
-            assert!(mgr.contains("/usr/bin")); // Second occurrence still there
+            assert!(mgr.contains("/usr/bin").unwrap()); // Second occurrence still there
         }
     }
 
@@ -367,14 +457,14 @@ mod tests {
         let mut mgr = create_test_manager();
 
         if cfg!(windows) {
-            let removed = mgr.remove_all("C:\\Windows");
+            let removed = mgr.remove_all("C:\\Windows").unwrap();
             assert_eq!(removed, 2); // There are two C:\Windows entries
-            assert!(!mgr.contains("C:\\Windows"));
+            assert!(!mgr.contains("C:\\Windows").unwrap());
             assert_eq!(mgr.len(), 3);
         } else {
-            let removed = mgr.remove_all("/usr/bin");
+            let removed = mgr.remove_all("/usr/bin").unwrap();
             assert_eq!(removed, 2); // There are two /usr/bin entries
-            assert!(!mgr.contains("/usr/bin"));
+            assert!(!mgr.contains("/usr/bin").unwrap());
             assert_eq!(mgr.len(), 3);
         }
     }
@@ -384,7 +474,7 @@ mod tests {
         let mut mgr = create_test_manager();
         let original_len = mgr.len();
 
-        let removed = mgr.remove_all("NonExistent");
+        let removed = mgr.remove_all("NonExistent").unwrap();
         assert_eq!(removed, 0);
         assert_eq!(mgr.len(), original_len);
     }
@@ -428,7 +518,7 @@ mod tests {
     #[test]
     fn test_get_duplicates() {
         let mgr = create_test_manager();
-        let duplicates = mgr.get_duplicates();
+        let duplicates = mgr.get_duplicates().unwrap();
 
         if cfg!(windows) {
             assert_eq!(duplicates.len(), 1);
@@ -447,7 +537,7 @@ mod tests {
             "/path1:/path2:/path3"
         };
         let mgr = PathManager::new(path);
-        let duplicates = mgr.get_duplicates();
+        let duplicates = mgr.get_duplicates().unwrap();
         assert!(duplicates.is_empty());
     }
 
@@ -455,21 +545,33 @@ mod tests {
     fn test_get_duplicates_case_insensitive_windows() {
         if cfg!(windows) {
             let mgr = PathManager::new("C:\\Windows;c:\\windows;C:\\WINDOWS");
-            let duplicates = mgr.get_duplicates();
+            let duplicates = mgr.get_duplicates().unwrap();
             assert_eq!(duplicates.len(), 2); // First one is not a duplicate
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn expands_environment_tokens_for_checks_without_rewriting_raw_entries() {
+        let user_profile = std::env::var("USERPROFILE").expect("USERPROFILE");
+        let raw = "%USERPROFILE%";
+        let manager = PathManager::new(&format!("{raw};{user_profile}"));
+
+        assert_eq!(manager.get_duplicates().unwrap(), vec![user_profile]);
+        assert!(manager.get_invalid().unwrap().is_empty());
+        assert!(manager.to_string().starts_with(raw));
     }
 
     #[test]
     fn test_deduplicate_keep_first() {
         let mut mgr = create_test_manager();
-        let removed = mgr.deduplicate(true);
+        let removed = mgr.deduplicate(true).unwrap();
 
         assert_eq!(removed, 1); // One duplicate removed
         assert_eq!(mgr.len(), 4);
 
         // Check no duplicates remain
-        let duplicates = mgr.get_duplicates();
+        let duplicates = mgr.get_duplicates().unwrap();
         assert!(duplicates.is_empty());
 
         // Verify first occurrence was kept
@@ -483,23 +585,23 @@ mod tests {
     #[test]
     fn test_deduplicate_keep_last() {
         let mut mgr = create_test_manager();
-        let removed = mgr.deduplicate(false);
+        let removed = mgr.deduplicate(false).unwrap();
 
         assert_eq!(removed, 1); // One duplicate removed
         assert_eq!(mgr.len(), 4);
 
         // Check no duplicates remain
-        let duplicates = mgr.get_duplicates();
+        let duplicates = mgr.get_duplicates().unwrap();
         assert!(duplicates.is_empty());
 
         // Verify last occurrence was kept
         if cfg!(windows) {
             // C:\Windows was at index 0 and 3, so after dedup keeping last, it should be at index 2
-            assert!(mgr.contains("C:\\Windows"));
-            assert_eq!(mgr.find_index("C:\\Windows"), Some(2));
+            assert!(mgr.contains("C:\\Windows").unwrap());
+            assert_eq!(mgr.find_index("C:\\Windows").unwrap(), Some(2));
         } else {
-            assert!(mgr.contains("/usr/bin"));
-            assert_eq!(mgr.find_index("/usr/bin"), Some(2));
+            assert!(mgr.contains("/usr/bin").unwrap());
+            assert_eq!(mgr.find_index("/usr/bin").unwrap(), Some(2));
         }
     }
 
@@ -552,12 +654,12 @@ mod tests {
     #[test]
     fn test_normalize_path_trailing_slashes() {
         if cfg!(windows) {
-            assert_eq!(PathManager::normalize_path("C:\\Path\\"), "c:\\path");
-            assert_eq!(PathManager::normalize_path("C:\\Path/"), "c:\\path");
-            assert_eq!(PathManager::normalize_path("C:\\Path\\\\"), "c:\\path");
+            assert_eq!(PathManager::normalize_path("C:\\Path\\").unwrap(), "c:\\path");
+            assert_eq!(PathManager::normalize_path("C:\\Path/").unwrap(), "c:\\path");
+            assert_eq!(PathManager::normalize_path("C:\\Path\\\\").unwrap(), "c:\\path");
         } else {
-            assert_eq!(PathManager::normalize_path("/path/"), "/path");
-            assert_eq!(PathManager::normalize_path("/path//"), "/path");
+            assert_eq!(PathManager::normalize_path("/path/").unwrap(), "/path");
+            assert_eq!(PathManager::normalize_path("/path//").unwrap(), "/path");
         }
     }
 
@@ -566,22 +668,22 @@ mod tests {
         if cfg!(windows) {
             // Windows: case-insensitive
             assert_eq!(
-                PathManager::normalize_path("C:\\Path"),
-                PathManager::normalize_path("c:\\path")
+                PathManager::normalize_path("C:\\Path").unwrap(),
+                PathManager::normalize_path("c:\\path").unwrap()
             );
             assert_eq!(
-                PathManager::normalize_path("C:\\PATH"),
-                PathManager::normalize_path("c:\\path")
+                PathManager::normalize_path("C:\\PATH").unwrap(),
+                PathManager::normalize_path("c:\\path").unwrap()
             );
         } else {
             // Unix: case-sensitive
             assert_ne!(
-                PathManager::normalize_path("/Path"),
-                PathManager::normalize_path("/path")
+                PathManager::normalize_path("/Path").unwrap(),
+                PathManager::normalize_path("/path").unwrap()
             );
             assert_ne!(
-                PathManager::normalize_path("/PATH"),
-                PathManager::normalize_path("/path")
+                PathManager::normalize_path("/PATH").unwrap(),
+                PathManager::normalize_path("/path").unwrap()
             );
         }
     }
@@ -590,12 +692,18 @@ mod tests {
     fn test_normalize_path_slash_conversion() {
         if cfg!(windows) {
             // Windows: convert forward slashes to backslashes
-            assert_eq!(PathManager::normalize_path("C:/Path/To/Dir"), "c:\\path\\to\\dir");
-            assert_eq!(PathManager::normalize_path("C:\\Path/To\\Dir"), "c:\\path\\to\\dir");
+            assert_eq!(
+                PathManager::normalize_path("C:/Path/To/Dir").unwrap(),
+                "c:\\path\\to\\dir"
+            );
+            assert_eq!(
+                PathManager::normalize_path("C:\\Path/To\\Dir").unwrap(),
+                "c:\\path\\to\\dir"
+            );
         } else {
             // Unix: convert backslashes to forward slashes
-            assert_eq!(PathManager::normalize_path("/path\\to\\dir"), "/path/to/dir");
-            assert_eq!(PathManager::normalize_path("/path\\to/dir"), "/path/to/dir");
+            assert_eq!(PathManager::normalize_path("/path\\to\\dir").unwrap(), "/path/to/dir");
+            assert_eq!(PathManager::normalize_path("/path\\to/dir").unwrap(), "/path/to/dir");
         }
     }
 
@@ -618,7 +726,7 @@ mod tests {
             assert_eq!(mgr.len(), 5);
 
             // Remove duplicates
-            let removed = mgr.deduplicate(true);
+            let removed = mgr.deduplicate(true).unwrap();
             assert_eq!(removed, 2);
             assert_eq!(mgr.len(), 3);
 
@@ -636,7 +744,7 @@ mod tests {
             assert_eq!(mgr.len(), 5);
 
             // Remove duplicates
-            let removed = mgr.deduplicate(true);
+            let removed = mgr.deduplicate(true).unwrap();
             assert_eq!(removed, 2);
             assert_eq!(mgr.len(), 3);
 

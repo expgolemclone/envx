@@ -238,7 +238,7 @@ impl PathAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EnvVar, EnvVarSource};
+    use crate::{EnvScope, EnvVar};
     use chrono::Utc;
     use std::fs;
     use tempfile::TempDir;
@@ -248,7 +248,8 @@ mod tests {
         EnvVar {
             name: name.to_string(),
             value: value.to_string(),
-            source: EnvVarSource::User,
+            scope: EnvScope::User,
+            kind: crate::EnvValueKind::String,
             modified: Utc::now(),
             original_value: None,
         }

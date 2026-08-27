@@ -1,5 +1,5 @@
 use crate::snapshot::Snapshot;
-use crate::{EnvVar, EnvVarManager};
+use crate::{EnvKey, EnvVar, EnvVarManager};
 use ahash::AHashMap as HashMap;
 use color_eyre::Result;
 use color_eyre::eyre::eyre;
@@ -69,7 +69,7 @@ impl SnapshotManager {
         }
 
         // Sort by creation date (newest first)
-        snapshots.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        snapshots.sort_by_key(|snapshot| std::cmp::Reverse(snapshot.created_at));
         Ok(snapshots)
     }
 
@@ -113,7 +113,7 @@ impl SnapshotManager {
         Ok(())
     }
 
-    /// Restores environment variables from a snapshot by clearing current variables and applying snapshot values.
+    /// Applies every environment variable from a snapshot to its recorded scope.
     ///
     /// # Errors
     ///
@@ -125,12 +125,9 @@ impl SnapshotManager {
     pub fn restore(&self, id_or_name: &str, manager: &mut EnvVarManager) -> Result<()> {
         let snapshot = self.get(id_or_name)?;
 
-        // Clear current variables
-        manager.clear();
-
-        // Restore from snapshot
-        for (_, var) in snapshot.variables {
-            manager.set(&var.name, &var.value, true)?;
+        // Keep the loaded current state so each mutation can back up the value it replaces.
+        for var in snapshot.variables {
+            manager.set(var.scope, &var.name, &var.value, Some(var.kind))?;
         }
 
         Ok(())
@@ -150,24 +147,35 @@ impl SnapshotManager {
 
         let mut diff = SnapshotDiff::default();
 
-        // Find added and modified
-        for (name, var2) in &snap2.variables {
-            match snap1.variables.get(name) {
+        let vars1: HashMap<EnvKey, &EnvVar> = snap1
+            .variables
+            .iter()
+            .map(|variable| (EnvKey::new(variable.scope, &variable.name), variable))
+            .collect();
+        let vars2: HashMap<EnvKey, &EnvVar> = snap2
+            .variables
+            .iter()
+            .map(|variable| (EnvKey::new(variable.scope, &variable.name), variable))
+            .collect();
+
+        // Find added and modified.
+        for (key, var2) in &vars2 {
+            match vars1.get(key) {
                 Some(var1) => {
                     if var1.value != var2.value {
-                        diff.modified.insert(name.clone(), (var1.clone(), var2.clone()));
+                        diff.modified.push(((*var1).clone(), (*var2).clone()));
                     }
                 }
                 None => {
-                    diff.added.insert(name.clone(), var2.clone());
+                    diff.added.push((*var2).clone());
                 }
             }
         }
 
-        // Find removed
-        for (name, var1) in &snap1.variables {
-            if !snap2.variables.contains_key(name) {
-                diff.removed.insert(name.clone(), var1.clone());
+        // Find removed.
+        for (key, var1) in &vars1 {
+            if !vars2.contains_key(key) {
+                diff.removed.push((*var1).clone());
             }
         }
 
@@ -184,15 +192,15 @@ impl SnapshotManager {
 
 #[derive(Debug, Default)]
 pub struct SnapshotDiff {
-    pub added: HashMap<String, EnvVar>,
-    pub removed: HashMap<String, EnvVar>,
-    pub modified: HashMap<String, (EnvVar, EnvVar)>, // (old, new)
+    pub added: Vec<EnvVar>,
+    pub removed: Vec<EnvVar>,
+    pub modified: Vec<(EnvVar, EnvVar)>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EnvVar, EnvVarSource};
+    use crate::{EnvScope, EnvVar};
     use chrono::Utc;
     use tempfile::TempDir;
 
@@ -209,7 +217,8 @@ mod tests {
         EnvVar {
             name: name.to_string(),
             value: value.to_string(),
-            source: EnvVarSource::User,
+            scope: EnvScope::Process,
+            kind: crate::EnvValueKind::String,
             modified: Utc::now(),
             original_value: None,
         }
@@ -217,9 +226,9 @@ mod tests {
 
     fn create_test_env_manager() -> EnvVarManager {
         let mut manager = EnvVarManager::new();
-        manager.set("VAR1", "value1", false).unwrap();
-        manager.set("VAR2", "value2", false).unwrap();
-        manager.set("VAR3", "value3", false).unwrap();
+        manager.set(EnvScope::Process, "VAR1", "value1", None).unwrap();
+        manager.set(EnvScope::Process, "VAR2", "value2", None).unwrap();
+        manager.set(EnvScope::Process, "VAR3", "value3", None).unwrap();
         manager
     }
 
@@ -255,8 +264,8 @@ mod tests {
         assert_eq!(snapshot.name, "test-snapshot");
         assert_eq!(snapshot.description, Some("Test description".to_string()));
         assert_eq!(snapshot.variables.len(), 2);
-        assert!(snapshot.variables.contains_key("TEST_VAR1"));
-        assert!(snapshot.variables.contains_key("TEST_VAR2"));
+        assert!(snapshot.variables.iter().any(|variable| variable.name == "TEST_VAR1"));
+        assert!(snapshot.variables.iter().any(|variable| variable.name == "TEST_VAR2"));
 
         // Verify snapshot was saved to disk
         let snapshot_path = manager.storage_dir.join(format!("{}.json", snapshot.id));
@@ -434,13 +443,19 @@ mod tests {
         let result = manager.restore(&snapshot.id, &mut env_manager);
         assert!(result.is_ok());
 
-        // Verify old variables are cleared and new ones are set
-        assert!(env_manager.get("VAR1").is_none());
-        assert!(env_manager.get("VAR2").is_none());
-        assert!(env_manager.get("VAR3").is_none());
+        // Existing variables remain available and snapshot variables are applied.
+        assert_eq!(env_manager.get(EnvScope::Process, "VAR1").unwrap().value, "value1");
+        assert_eq!(env_manager.get(EnvScope::Process, "VAR2").unwrap().value, "value2");
+        assert_eq!(env_manager.get(EnvScope::Process, "VAR3").unwrap().value, "value3");
 
-        assert_eq!(env_manager.get("NEW_VAR1").unwrap().value, "new_value1");
-        assert_eq!(env_manager.get("NEW_VAR2").unwrap().value, "new_value2");
+        assert_eq!(
+            env_manager.get(EnvScope::Process, "NEW_VAR1").unwrap().value,
+            "new_value1"
+        );
+        assert_eq!(
+            env_manager.get(EnvScope::Process, "NEW_VAR2").unwrap().value,
+            "new_value2"
+        );
     }
 
     #[test]
@@ -493,18 +508,18 @@ mod tests {
 
         // Check added
         assert_eq!(diff.added.len(), 1);
-        assert!(diff.added.contains_key("VAR4"));
-        assert_eq!(diff.added.get("VAR4").unwrap().value, "value4");
+        assert_eq!(diff.added[0].name, "VAR4");
+        assert_eq!(diff.added[0].value, "value4");
 
         // Check removed
         assert_eq!(diff.removed.len(), 1);
-        assert!(diff.removed.contains_key("VAR3"));
-        assert_eq!(diff.removed.get("VAR3").unwrap().value, "value3");
+        assert_eq!(diff.removed[0].name, "VAR3");
+        assert_eq!(diff.removed[0].value, "value3");
 
         // Check modified
         assert_eq!(diff.modified.len(), 1);
-        assert!(diff.modified.contains_key("VAR2"));
-        let (old, new) = diff.modified.get("VAR2").unwrap();
+        let (old, new) = &diff.modified[0];
+        assert_eq!(old.name, "VAR2");
         assert_eq!(old.value, "old_value");
         assert_eq!(new.value, "new_value");
     }

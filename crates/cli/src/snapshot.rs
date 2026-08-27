@@ -25,6 +25,9 @@ pub enum SnapshotCommands {
     Show {
         /// Snapshot name or ID
         snapshot: String,
+        /// Reveal variable values
+        #[arg(long)]
+        reveal: bool,
     },
     /// Restore from a snapshot
     Restore {
@@ -48,6 +51,9 @@ pub enum SnapshotCommands {
         snapshot1: String,
         /// Second snapshot
         snapshot2: String,
+        /// Reveal old and new values
+        #[arg(long)]
+        reveal: bool,
     },
 }
 
@@ -62,6 +68,7 @@ pub enum SnapshotCommands {
 /// - File I/O operations fail during snapshot operations
 /// - User input cannot be read from stdin
 /// - Invalid snapshot names or IDs are provided
+#[allow(clippy::too_many_lines)]
 pub fn handle_snapshot(args: SnapshotArgs) -> Result<()> {
     let snapshot_manager = SnapshotManager::new()?;
     let mut env_manager = EnvVarManager::new();
@@ -69,7 +76,15 @@ pub fn handle_snapshot(args: SnapshotArgs) -> Result<()> {
 
     match args.command {
         SnapshotCommands::Create { name, description } => {
-            let vars = env_manager.list().into_iter().cloned().collect();
+            let vars: Vec<_> = env_manager.list(None).into_iter().cloned().collect();
+            if vars
+                .iter()
+                .any(|variable: &envx_core::EnvVar| variable.name.contains('='))
+            {
+                return Err(color_eyre::eyre::eyre!(
+                    "Snapshot refused because the environment contains invalid names. Run repair invalid-names first"
+                ));
+            }
             let snapshot = snapshot_manager.create(name, description, vars)?;
             println!("✅ Created snapshot: {} (ID: {})", snapshot.name, snapshot.id);
         }
@@ -95,7 +110,7 @@ pub fn handle_snapshot(args: SnapshotArgs) -> Result<()> {
 
             println!("{table}");
         }
-        SnapshotCommands::Show { snapshot } => {
+        SnapshotCommands::Show { snapshot, reveal } => {
             let snap = snapshot_manager.get(&snapshot)?;
             println!("Snapshot: {}", snap.name);
             println!("ID: {}", snap.id);
@@ -105,8 +120,15 @@ pub fn handle_snapshot(args: SnapshotArgs) -> Result<()> {
 
             // Show first 10 variables
             println!("\nFirst 10 variables:");
-            for (i, (name, var)) in snap.variables.iter().take(10).enumerate() {
-                println!("  {}. {} = {}", i + 1, name, var.value);
+            for (i, var) in snap.variables.iter().take(10).enumerate() {
+                let value = if reveal { var.value.as_str() } else { "[REDACTED]" };
+                println!(
+                    "  {}. {} {} = {}",
+                    i + 1,
+                    var.scope,
+                    crate::list::safe_name(&var.name),
+                    value
+                );
             }
 
             if snap.variables.len() > 10 {
@@ -115,7 +137,7 @@ pub fn handle_snapshot(args: SnapshotArgs) -> Result<()> {
         }
         SnapshotCommands::Restore { snapshot, force } => {
             if !force {
-                print!("⚠️  This will replace all current environment variables. Continue? [y/N] ");
+                print!("⚠️  This will apply every variable and scope in the snapshot. Continue? [y/N] ");
                 std::io::Write::flush(&mut std::io::stdout())?;
 
                 let mut input = String::new();
@@ -145,7 +167,11 @@ pub fn handle_snapshot(args: SnapshotArgs) -> Result<()> {
             snapshot_manager.delete(&snapshot)?;
             println!("✅ Deleted snapshot: {snapshot}");
         }
-        SnapshotCommands::Diff { snapshot1, snapshot2 } => {
+        SnapshotCommands::Diff {
+            snapshot1,
+            snapshot2,
+            reveal,
+        } => {
             let diff = snapshot_manager.diff(&snapshot1, &snapshot2)?;
 
             if diff.added.is_empty() && diff.removed.is_empty() && diff.modified.is_empty() {
@@ -155,24 +181,28 @@ pub fn handle_snapshot(args: SnapshotArgs) -> Result<()> {
 
             if !diff.added.is_empty() {
                 println!("➕ Added in {snapshot2}:");
-                for (name, var) in &diff.added {
-                    println!("   {} = {}", name, var.value);
+                for var in &diff.added {
+                    let value = if reveal { var.value.as_str() } else { "[REDACTED]" };
+                    println!("   {} {} = {}", var.scope, crate::list::safe_name(&var.name), value);
                 }
             }
 
             if !diff.removed.is_empty() {
                 println!("\n➖ Removed in {snapshot2}:");
-                for (name, var) in &diff.removed {
-                    println!("   {} = {}", name, var.value);
+                for var in &diff.removed {
+                    let value = if reveal { var.value.as_str() } else { "[REDACTED]" };
+                    println!("   {} {} = {}", var.scope, crate::list::safe_name(&var.name), value);
                 }
             }
 
             if !diff.modified.is_empty() {
                 println!("\n🔄 Modified:");
-                for (name, (old, new)) in &diff.modified {
-                    println!("   {name}:");
-                    println!("     Old: {}", old.value);
-                    println!("     New: {}", new.value);
+                for (old, new) in &diff.modified {
+                    let old_value = if reveal { old.value.as_str() } else { "[REDACTED]" };
+                    let new_value = if reveal { new.value.as_str() } else { "[REDACTED]" };
+                    println!("   {} {}:", new.scope, crate::list::safe_name(&new.name));
+                    println!("     Old: {old_value}");
+                    println!("     New: {new_value}");
                 }
             }
         }

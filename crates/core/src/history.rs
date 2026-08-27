@@ -1,14 +1,18 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::EnvScope;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HistoryAction {
     Set {
+        scope: EnvScope,
         name: String,
         old_value: Option<String>,
         new_value: String,
     },
     Delete {
+        scope: EnvScope,
         name: String,
         old_value: String,
     },

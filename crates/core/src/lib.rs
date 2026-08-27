@@ -1,4 +1,5 @@
 pub mod analysis;
+pub mod backup;
 pub mod env;
 mod env_watcher;
 pub mod error;
@@ -15,7 +16,8 @@ mod templates;
 pub mod wizard;
 
 pub use analysis::{Analyzer, PathAnalyzer, ValidationResult};
-pub use env::{EnvVar, EnvVarManager, EnvVarSource};
+pub use backup::{BackupManager, BackupSummary, EnvironmentBackup};
+pub use env::{EnvBackend, EnvKey, EnvScope, EnvValueKind, EnvVar, EnvVarManager, SystemEnvBackend};
 pub use env_watcher::{ChangeEvent, ChangeType, ConflictStrategy, EnvWatcher, SyncMode, WatchConfig};
 pub use error::EnvxError;
 pub use exporter::{ExportFormat, Exporter};

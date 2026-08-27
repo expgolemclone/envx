@@ -101,8 +101,8 @@ impl Exporter {
         for var in &self.variables {
             if self.include_metadata {
                 lines.push(format!(
-                    "# Source: {:?}, Modified: {}",
-                    var.source,
+                    "# Scope: {:?}, Modified: {}",
+                    var.scope,
                     var.modified.format("%Y-%m-%d %H:%M:%S")
                 ));
             }
@@ -172,7 +172,7 @@ impl Exporter {
 
         for var in &self.variables {
             if self.include_metadata {
-                lines.push(format!("# Source: {:?}", var.source));
+                lines.push(format!("# Scope: {:?}", var.scope));
             }
 
             // For YAML, we need to quote values that contain special YAML characters
@@ -229,7 +229,7 @@ impl Exporter {
         for var in &self.variables {
             if self.include_metadata {
                 lines.push(format!("# Name: {}", var.name));
-                lines.push(format!("# Source: {:?}", var.source));
+                lines.push(format!("# Scope: {:?}", var.scope));
                 lines.push(format!("# Modified: {}", var.modified));
             }
             lines.push(format!("{}={}", var.name, var.value));
@@ -250,7 +250,7 @@ impl Exporter {
 
         for var in &self.variables {
             if self.include_metadata {
-                lines.push(format!("# {} ({:?})", var.name, var.source));
+                lines.push(format!("# {} ({:?})", var.name, var.scope));
             }
 
             // Escape PowerShell special characters
@@ -271,7 +271,7 @@ impl Exporter {
 
         for var in &self.variables {
             if self.include_metadata {
-                lines.push(format!("# {} ({:?})", var.name, var.source));
+                lines.push(format!("# {} ({:?})", var.name, var.scope));
             }
 
             // Escape shell special characters
@@ -295,8 +295,8 @@ impl Exporter {
 mod tests {
     #![allow(clippy::cognitive_complexity)]
     use super::*;
+    use crate::EnvScope as VarSource;
     use crate::EnvVar;
-    use crate::EnvVarSource as VarSource;
     use chrono::{DateTime, Utc};
     use std::fs;
     use tempfile::NamedTempFile;
@@ -307,42 +307,48 @@ mod tests {
             EnvVar {
                 name: "SIMPLE_VAR".to_string(),
                 value: "simple_value".to_string(),
-                source: VarSource::User,
+                scope: VarSource::User,
+                kind: crate::EnvValueKind::String,
                 modified: Utc::now(),
                 original_value: None,
             },
             EnvVar {
                 name: "PATH_VAR".to_string(),
                 value: "C:\\Program Files\\App;C:\\Windows\\System32".to_string(),
-                source: VarSource::System,
+                scope: VarSource::System,
+                kind: crate::EnvValueKind::String,
                 modified: Utc::now(),
                 original_value: None,
             },
             EnvVar {
                 name: "QUOTED_VAR".to_string(),
                 value: "value with \"quotes\" and 'single quotes'".to_string(),
-                source: VarSource::User,
+                scope: VarSource::User,
+                kind: crate::EnvValueKind::String,
                 modified: Utc::now(),
                 original_value: None,
             },
             EnvVar {
                 name: "SPECIAL_CHARS".to_string(),
                 value: "line1\nline2\ttab\\backslash".to_string(),
-                source: VarSource::Process,
+                scope: VarSource::Process,
+                kind: crate::EnvValueKind::String,
                 modified: Utc::now(),
                 original_value: None,
             },
             EnvVar {
                 name: "EMPTY_VAR".to_string(),
                 value: String::new(),
-                source: VarSource::User,
+                scope: VarSource::User,
+                kind: crate::EnvValueKind::String,
                 modified: Utc::now(),
                 original_value: None,
             },
             EnvVar {
                 name: "UNICODE_VAR".to_string(),
                 value: "Hello 世界 🌍".to_string(),
-                source: VarSource::User,
+                scope: VarSource::User,
+                kind: crate::EnvValueKind::String,
                 modified: Utc::now(),
                 original_value: None,
             },
@@ -466,7 +472,7 @@ mod tests {
         assert!(output.contains("# Environment variables exported by envx"));
         assert!(output.contains("# Date:"));
         assert!(output.contains("# Count: 6"));
-        assert!(output.contains("# Source:"));
+        assert!(output.contains("# Scope:"));
         assert!(output.contains("Modified:"));
     }
 
@@ -476,21 +482,24 @@ mod tests {
             EnvVar {
                 name: "HASH_VALUE".to_string(),
                 value: "value#with#hashes".to_string(),
-                source: VarSource::User,
+                scope: VarSource::User,
+                kind: crate::EnvValueKind::String,
                 modified: Utc::now(),
                 original_value: None,
             },
             EnvVar {
                 name: "EQUALS_VALUE".to_string(),
                 value: "key=value=pairs".to_string(),
-                source: VarSource::User,
+                scope: VarSource::User,
+                kind: crate::EnvValueKind::String,
                 modified: Utc::now(),
                 original_value: None,
             },
             EnvVar {
                 name: "SPACES_AROUND".to_string(),
                 value: "  spaces at start and end  ".to_string(),
-                source: VarSource::User,
+                scope: VarSource::User,
+                kind: crate::EnvValueKind::String,
                 modified: Utc::now(),
                 original_value: None,
             },
@@ -544,7 +553,7 @@ mod tests {
         let first_var = &variables[0];
         assert!(first_var["name"].is_string());
         assert!(first_var["value"].is_string());
-        assert!(first_var["source"].is_string());
+        assert!(first_var["scope"].is_string());
         assert!(first_var["modified"].is_string());
     }
 
@@ -580,7 +589,7 @@ mod tests {
         assert!(output.contains("# Environment variables exported by envx"));
         assert!(output.contains("# Date:"));
         assert!(output.contains("---"));
-        assert!(output.contains("# Source:"));
+        assert!(output.contains("# Scope:"));
     }
 
     #[test]
@@ -589,28 +598,32 @@ mod tests {
             EnvVar {
                 name: "URL".to_string(),
                 value: "https://example.com:8080/path".to_string(),
-                source: VarSource::User,
+                scope: VarSource::User,
+                kind: crate::EnvValueKind::String,
                 modified: Utc::now(),
                 original_value: None,
             },
             EnvVar {
                 name: "COMMENT".to_string(),
                 value: "value # with comment".to_string(),
-                source: VarSource::User,
+                scope: VarSource::User,
+                kind: crate::EnvValueKind::String,
                 modified: Utc::now(),
                 original_value: None,
             },
             EnvVar {
                 name: "LEADING_SPACE".to_string(),
                 value: "  value".to_string(),
-                source: VarSource::User,
+                scope: VarSource::User,
+                kind: crate::EnvValueKind::String,
                 modified: Utc::now(),
                 original_value: None,
             },
             EnvVar {
                 name: "TRAILING_SPACE".to_string(),
                 value: "value  ".to_string(),
-                source: VarSource::User,
+                scope: VarSource::User,
+                kind: crate::EnvValueKind::String,
                 modified: Utc::now(),
                 original_value: None,
             },
@@ -646,7 +659,7 @@ mod tests {
         assert!(output.contains("# Generated:"));
         assert!(output.contains("# Total: 6 variables"));
         assert!(output.contains("# Name: SIMPLE_VAR"));
-        assert!(output.contains("# Source:"));
+        assert!(output.contains("# Scope:"));
         assert!(output.contains("# Modified:"));
     }
 
@@ -676,14 +689,16 @@ mod tests {
             EnvVar {
                 name: "BACKTICK".to_string(),
                 value: "value`with`backticks".to_string(),
-                source: VarSource::User,
+                scope: VarSource::User,
+                kind: crate::EnvValueKind::String,
                 modified: Utc::now(),
                 original_value: None,
             },
             EnvVar {
                 name: "DOLLAR".to_string(),
                 value: "$variable $test".to_string(),
-                source: VarSource::User,
+                scope: VarSource::User,
+                kind: crate::EnvValueKind::String,
                 modified: Utc::now(),
                 original_value: None,
             },
@@ -725,21 +740,24 @@ mod tests {
             EnvVar {
                 name: "DOLLAR".to_string(),
                 value: "$HOME/path".to_string(),
-                source: VarSource::User,
+                scope: VarSource::User,
+                kind: crate::EnvValueKind::String,
                 modified: Utc::now(),
                 original_value: None,
             },
             EnvVar {
                 name: "BACKTICK".to_string(),
                 value: "`command`".to_string(),
-                source: VarSource::User,
+                scope: VarSource::User,
+                kind: crate::EnvValueKind::String,
                 modified: Utc::now(),
                 original_value: None,
             },
             EnvVar {
                 name: "BACKSLASH".to_string(),
                 value: "path\\to\\file".to_string(),
-                source: VarSource::User,
+                scope: VarSource::User,
+                kind: crate::EnvValueKind::String,
                 modified: Utc::now(),
                 original_value: None,
             },
@@ -815,28 +833,32 @@ mod tests {
             EnvVar {
                 name: "SIMPLE-NAME-WITH-DASHES".to_string(),
                 value: "value1".to_string(),
-                source: VarSource::User,
+                scope: VarSource::User,
+                kind: crate::EnvValueKind::String,
                 modified: Utc::now(),
                 original_value: None,
             },
             EnvVar {
                 name: "NAME.WITH.DOTS".to_string(),
                 value: "value2".to_string(),
-                source: VarSource::User,
+                scope: VarSource::User,
+                kind: crate::EnvValueKind::String,
                 modified: Utc::now(),
                 original_value: None,
             },
             EnvVar {
                 name: "_UNDERSCORE_START".to_string(),
                 value: "value3".to_string(),
-                source: VarSource::User,
+                scope: VarSource::User,
+                kind: crate::EnvValueKind::String,
                 modified: Utc::now(),
                 original_value: None,
             },
             EnvVar {
                 name: "123_NUMBER_START".to_string(),
                 value: "value4".to_string(),
-                source: VarSource::User,
+                scope: VarSource::User,
+                kind: crate::EnvValueKind::String,
                 modified: Utc::now(),
                 original_value: None,
             },
@@ -868,7 +890,8 @@ mod tests {
         let vars = vec![EnvVar {
             name: "LONG_VALUE".to_string(),
             value: long_value.clone(),
-            source: VarSource::User,
+            scope: VarSource::User,
+            kind: crate::EnvValueKind::String,
             modified: Utc::now(),
             original_value: None,
         }];
@@ -893,7 +916,8 @@ mod tests {
         let vars = vec![EnvVar {
             name: "TEST_VAR".to_string(),
             value: "test_value".to_string(),
-            source: VarSource::System,
+            scope: VarSource::System,
+            kind: crate::EnvValueKind::String,
             modified: fixed_time,
             original_value: None,
         }];
@@ -902,11 +926,11 @@ mod tests {
 
         // Check that metadata is formatted consistently
         let dotenv = exporter.to_dotenv();
-        assert!(dotenv.contains("# Source: System"));
+        assert!(dotenv.contains("# Scope: System"));
         assert!(dotenv.contains("2024-01-01 12:00:00"));
 
         let text = exporter.to_text();
-        assert!(text.contains("# Source: System"));
+        assert!(text.contains("# Scope: System"));
 
         let ps = exporter.to_powershell();
         assert!(ps.contains("# TEST_VAR (System)"));
