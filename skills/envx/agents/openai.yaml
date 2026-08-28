@@ -1,0 +1,7 @@
+interface:
+  display_name: "envx Environment Manager"
+  short_description: "Manage scoped environment variables with envx"
+  default_prompt: "Use $envx to inspect and update my environment variables."
+policy:
+  allow_implicit_invocation: true
+
