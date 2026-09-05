@@ -4,10 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn project_run_returns_nonzero_when_script_fails() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
+    let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
     let temp_dir = std::env::temp_dir().join(format!("envx-project-script-{unique}"));
     fs::create_dir_all(&temp_dir).unwrap();
 
