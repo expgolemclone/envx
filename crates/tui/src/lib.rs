@@ -7,12 +7,16 @@ use color_eyre::Result;
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    crossterm::event::{self, Event},
+    crossterm::event::{self, Event, KeyEvent, KeyEventKind},
 };
-use std::{
-    io,
-    time::{Duration, Instant},
-};
+use std::{io, time::Duration};
+
+fn pressed_key(event: &Event) -> Option<KeyEvent> {
+    match event {
+        Event::Key(key) if key.kind == KeyEventKind::Press => Some(*key),
+        _ => None,
+    }
+}
 
 /// Run the TUI application
 ///
@@ -49,29 +53,15 @@ pub fn run() -> Result<()> {
 
     terminal.clear()?;
 
-    // Simple event loop with debouncing
-    let mut last_key_time: Option<Instant> = None;
-
+    // Simple event loop
     loop {
         // Draw UI
         terminal.draw(|f| ui::draw(f, &mut app))?;
 
         // Handle events with timeout
         if event::poll(Duration::from_millis(50))? {
-            if let Ok(Event::Key(key)) = event::read() {
-                // Only handle key press events, ignore key release
-                if key.kind == event::KeyEventKind::Press {
-                    let now = Instant::now();
-
-                    // Debounce: ignore if key pressed within 100ms
-                    if let Some(last_time) = last_key_time {
-                        if now.duration_since(last_time) < Duration::from_millis(50) {
-                            continue;
-                        }
-                    }
-
-                    last_key_time = Some(now);
-
+            if let Ok(event) = event::read() {
+                if let Some(key) = pressed_key(&event) {
                     if app.handle_key_event(key)? {
                         break;
                     }
@@ -94,4 +84,35 @@ pub fn run() -> Result<()> {
     terminal.show_cursor()?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+    #[test]
+    fn preserves_consecutive_key_press_events() {
+        // Terminals report unbracketed paste text as consecutive key presses.
+        let pasted: String = "foobar"
+            .chars()
+            .filter_map(|character| {
+                pressed_key(&Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)))
+            })
+            .filter_map(|key| match key.code {
+                KeyCode::Char(character) => Some(character),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(pasted, "foobar");
+    }
+
+    #[test]
+    fn ignores_non_press_key_events() {
+        let release = KeyEvent::new_with_kind(KeyCode::Char('a'), KeyModifiers::NONE, KeyEventKind::Release);
+
+        assert_eq!(pressed_key(&Event::Key(release)), None);
+        assert_eq!(pressed_key(&Event::Resize(80, 24)), None);
+    }
 }
