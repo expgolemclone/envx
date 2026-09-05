@@ -2,6 +2,7 @@ use crate::EnvVar;
 use color_eyre::Result;
 use std::fs;
 
+#[allow(dead_code)]
 #[path = "exporter_impl.rs"]
 mod implementation;
 
