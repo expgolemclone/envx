@@ -262,13 +262,16 @@ impl ProjectManager {
 
         // Execute the script
         #[cfg(unix)]
-        {
-            std::process::Command::new("sh").arg("-c").arg(&script.run).status()?;
-        }
+        let status = std::process::Command::new("sh").arg("-c").arg(&script.run).status()?;
 
         #[cfg(windows)]
-        {
-            std::process::Command::new("cmd").arg("/C").arg(&script.run).status()?;
+        let status = std::process::Command::new("cmd").arg("/C").arg(&script.run).status()?;
+
+        if !status.success() {
+            return match status.code() {
+                Some(code) => Err(eyre!("Script '{script_name}' failed with exit code {code}")),
+                None => Err(eyre!("Script '{script_name}' terminated without an exit code")),
+            };
         }
 
         Ok(())
@@ -700,6 +703,29 @@ mod tests {
 
         // Verify script environment was applied
         assert_eq!(env_manager.get(EnvScope::Process, "NODE_ENV").unwrap().value, "test");
+    }
+
+    #[test]
+    fn test_run_script_nonzero_exit_returns_error_with_code() {
+        let (mut manager, _temp) = create_test_project_manager();
+        let mut env_manager = create_test_env_manager();
+        let mut config = create_test_config();
+        let failing_command = if cfg!(windows) { "exit /b 42" } else { "exit 42" };
+
+        config.scripts.insert(
+            "fail".to_string(),
+            Script {
+                description: Some("Fail intentionally".to_string()),
+                run: failing_command.to_string(),
+                env: HashMap::new(),
+            },
+        );
+        manager.config = Some(config);
+
+        let error = manager.run_script("fail", &mut env_manager).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("Script 'fail' failed"));
+        assert!(message.contains("exit code 42"));
     }
 
     #[test]
